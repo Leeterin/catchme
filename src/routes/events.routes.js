@@ -1,0 +1,18 @@
+const express = require('express');
+const { requireAuth } = require('../middleware/auth.middleware');
+const { listEvents, getEvent, createEvent, updateEvent, deleteEvent, matchCalendar, getFriendDaySchedule, getFriendMonthSchedule } = require('../controllers/events.controller');
+
+const router = express.Router();
+
+router.use(requireAuth);
+
+router.get('/', listEvents);
+router.post('/', createEvent);
+router.get('/match', matchCalendar); // /:id 보다 먼저 등록 (안 그러면 "match"가 id로 잡혀버림)
+router.get('/friend/:username/month', getFriendMonthSchedule); // /:id 보다 먼저 등록
+router.get('/friend/:username', getFriendDaySchedule); // /:id 보다 먼저 등록
+router.get('/:id', getEvent);
+router.patch('/:id', updateEvent);
+router.delete('/:id', deleteEvent);
+
+module.exports = router;

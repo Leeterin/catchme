@@ -1,0 +1,508 @@
+// ============================================================
+// CATCHME - Database Schema
+// ------------------------------------------------------------
+// 프라이버시 원칙: Event.title은 절대 다른 유저에게 노출되지 않는다.
+// 매칭 로직은 오직 status(Busy/Available)만 참조한다.
+// ============================================================
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+enum AvailabilityStatus {
+  BUSY
+  AVAILABLE
+}
+
+// ------------------------------------------------------------
+// User (회원가입 시 생성되는 계정)
+// ------------------------------------------------------------
+model User {
+  id           String   @id @default(uuid())
+  email        String   @unique
+  username     String   @unique // 아이디 (@username 형태로 검색/노출)
+  name         String
+  passwordHash String? // 소셜 로그인(카카오/네이버)으로 가입한 사람은 비밀번호가 없음
+
+  // 소셜 로그인 연결 정보
+  kakaoId String? @unique
+  naverId String? @unique
+
+  profileImageUrl String?
+  phone           String?
+  bio             String? // 자기소개
+
+  // 커뮤니티 화면에서 "현위치"를 썼을 때 최근 위치를 저장해둠 (다른 사람이 "내 근처 친구"를 찾을 때 이 위치가 기준이 됨).
+  // 명시적으로 "현위치"를 선택했을 때만 갱신됨 - 항상 추적되는 게 아님
+  lastLat       Float?
+  lastLon       Float?
+  lastLocatedAt DateTime?
+  locationSharing Boolean @default(false) // "위치 공유 동의"를 명시적으로 했는지 (좌표가 있어도 이게 꺼져있으면 근처 친구 추천 대상이 안 됨)
+
+  // 공개/비공개 설정 - 친구에게 보일지 여부
+  phonePublic Boolean @default(false)
+  emailPublic Boolean @default(true)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  events         Event[]
+  createdRooms   MatchingRoom[]    @relation("RoomCreator")
+  participations RoomParticipant[]
+  createdMeetups Meetup[]
+  meetupJoins    MeetupParticipant[]
+  feedPosts      FeedPost[]
+  timeProposalVotes TimeProposalVote[]
+  friendSettingsGiven    FriendSettings[] @relation("SettingsOwner")
+  friendSettingsReceived FriendSettings[] @relation("SettingsFriend")
+  friendGroups     FriendGroup[]       @relation("GroupOwner")
+  groupMemberships FriendGroupMember[] @relation("GroupMemberOf")
+  settings       UserSettings?
+  blockedUsers   Block[] @relation("Blocker")
+  blockedByUsers Block[] @relation("Blocked")
+
+  sentFriendRequests     FriendRequest[] @relation("SentRequests")
+  receivedFriendRequests FriendRequest[] @relation("ReceivedRequests")
+
+  chatRoomMemberships ChatRoomMember[]
+  sentMessages        Message[]
+  refreshTokens       RefreshToken[]
+  passwordResetTokens PasswordResetToken[]
+
+  @@map("users")
+}
+
+// ------------------------------------------------------------
+// RefreshToken (로그인 유지용 - 액세스 토큰이 만료되면 이걸로 재발급)
+// ------------------------------------------------------------
+model RefreshToken {
+  id        String   @id @default(uuid())
+  token     String   @unique
+  userId    String
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  expiresAt DateTime
+  createdAt DateTime @default(now())
+
+  @@index([userId])
+  @@map("refresh_tokens")
+}
+
+// 비밀번호 재설정 링크 - 이메일로 받은 원본 토큰은 여기 저장 안 하고, 해시만 저장함(유출돼도 재사용 불가)
+model PasswordResetToken {
+  id        String   @id @default(uuid())
+  tokenHash String   @unique
+  userId    String
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  expiresAt DateTime
+  used      Boolean  @default(false)
+  createdAt DateTime @default(now())
+
+  @@index([userId])
+  @@map("password_reset_tokens")
+}
+
+// ------------------------------------------------------------
+// FriendRequest (친구 요청 - 수락되면 곧 친구 관계가 됨)
+// ------------------------------------------------------------
+enum FriendRequestStatus {
+  PENDING
+  ACCEPTED
+  DECLINED
+}
+
+model FriendRequest {
+  id          String              @id @default(uuid())
+  senderId    String
+  sender      User                @relation("SentRequests", fields: [senderId], references: [id], onDelete: Cascade)
+  receiverId  String
+  receiver    User                @relation("ReceivedRequests", fields: [receiverId], references: [id], onDelete: Cascade)
+  status      FriendRequestStatus @default(PENDING)
+  createdAt   DateTime            @default(now())
+  respondedAt DateTime?
+
+  // 같은 두 사람 사이에 중복 요청이 쌓이지 않도록
+  @@unique([senderId, receiverId])
+  @@index([receiverId, status])
+  @@map("friend_requests")
+}
+
+// ------------------------------------------------------------
+// Chat (1:1 / 그룹 채팅방, 메시지, 예약 요청)
+// ------------------------------------------------------------
+enum MessageType {
+  TEXT
+  RESERVATION
+  TIME_PROPOSAL
+  LOCATION_SUGGEST
+  IMAGE
+}
+
+enum ProposalStatus {
+  VOTING
+  CONFIRMED
+  CANCELLED
+}
+
+enum ReservationStatus {
+  PENDING
+  CONFIRMED
+  DECLINED
+  WITHDRAWN // 보낸 사람이 대기중인 요청을 스스로 취소
+  CANCELLED // 확정됐던 예약을 나중에 취소
+}
+
+model ChatRoom {
+  id        String   @id @default(uuid())
+  isGroup   Boolean  @default(false)
+  name      String? // 그룹방 이름. 1:1 채팅은 null이고 프론트에서 상대방 이름을 사용
+  createdAt DateTime @default(now())
+
+  members  ChatRoomMember[]
+  messages Message[]
+  pinnedItems PinnedItem[]
+  meetup   Meetup?
+
+  @@map("chat_rooms")
+}
+
+model ChatRoomMember {
+  id         String   @id @default(uuid())
+  chatRoomId String
+  chatRoom   ChatRoom @relation(fields: [chatRoomId], references: [id], onDelete: Cascade)
+  userId     String
+  user       User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  joinedAt   DateTime @default(now())
+  lastReadAt DateTime @default(now()) // 이 멤버가 이 방을 마지막으로 읽은 시각 (이후 도착 메시지가 "안읽음")
+  muted      Boolean  @default(false) // 이 방의 알림(토스트)만 끔 - 안읽음 표시는 그대로 유지됨
+
+  @@unique([chatRoomId, userId])
+  @@map("chat_room_members")
+}
+
+model Message {
+  id         String      @id @default(uuid())
+  chatRoomId String
+  chatRoom   ChatRoom    @relation(fields: [chatRoomId], references: [id], onDelete: Cascade)
+  senderId   String
+  sender     User        @relation(fields: [senderId], references: [id], onDelete: Cascade)
+  type       MessageType @default(TEXT)
+  createdAt  DateTime    @default(now())
+
+  // TEXT 메시지일 때
+  text String?
+
+  // RESERVATION 메시지일 때 (캘린더 매칭에서 이어지는 예약 요청)
+  reservationStart  DateTime?
+  reservationEnd    DateTime?
+  reservationNote   String?
+  reservationLocation    String?
+  reservationLocationLat Float?
+  reservationLocationLon Float?
+  reservationStatus ReservationStatus?
+
+  // LOCATION_SUGGEST 메시지일 때 (핫플레이스를 장소로 제안하고 수락/거절)
+  locationPlace   String?
+  locationNote    String?
+  locationAddress String?
+  locationLat     Float?
+  locationLon     Float?
+  locationStatus  ReservationStatus? // 같은 상태값(PENDING/CONFIRMED/DECLINED/WITHDRAWN/CANCELLED)을 재사용
+
+  // IMAGE 메시지일 때 - 사진을 base64로 DB에 직접 저장 (프로필 사진과 같은 방식)
+  imageUrl String?
+
+  // TIME_PROPOSAL 메시지일 때 (그룹에 여러 시간 후보를 제안하고 투표)
+  proposalStatus ProposalStatus?
+  proposalOptions TimeProposalOption[]
+
+  @@index([chatRoomId, createdAt])
+  @@map("messages")
+}
+
+// 시간 제안 메시지 하나에 딸린 시간 후보 하나
+model TimeProposalOption {
+  id        String   @id @default(uuid())
+  messageId String
+  message   Message  @relation(fields: [messageId], references: [id], onDelete: Cascade)
+  startTime DateTime
+  endTime   DateTime
+  votes     TimeProposalVote[]
+
+  @@map("time_proposal_options")
+}
+
+// 어떤 후보에 누가 투표했는지 (한 사람은 한 후보에만 투표, 바꾸면 기존 투표는 지워짐)
+model TimeProposalVote {
+  id        String   @id @default(uuid())
+  optionId  String
+  option    TimeProposalOption @relation(fields: [optionId], references: [id], onDelete: Cascade)
+  userId    String
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  createdAt DateTime @default(now())
+
+  @@unique([optionId, userId])
+  @@map("time_proposal_votes")
+}
+
+// ------------------------------------------------------------
+// Event (개인 일정 - Title은 Private)
+// ------------------------------------------------------------
+model Event {
+  id        String             @id @default(uuid())
+  userId    String
+  user      User               @relation(fields: [userId], references: [id], onDelete: Cascade)
+  startTime DateTime
+  endTime   DateTime
+  title     String // ⚠️ Private: 다른 유저/응답에 절대 노출 금지
+  status    AvailabilityStatus @default(BUSY)
+  eventType String             @default("busy") // "busy" | "available"
+
+  // 공개 설정 - 친구 캘린더 보기/매칭에서 이 일정이 "바쁨/가능"으로 노출될지 여부
+  // visiblePrivate=true면 나만보기(friend_settings.privateAccess로 예외 허용된 사람만 봄).
+  // 그게 아니고 visibleGroupIds가 비어있지 않으면, 그 그룹(들)에 속한 친구에게만 공개.
+  // 그것도 아니면(나만보기X, 그룹 지정 없음) 모든 친구에게 공개.
+  visiblePrivate  Boolean  @default(false)
+  visibleGroupIds String[] @default([])
+
+  // 예약 요청을 보냈지만 아직 상대가 수락/거절하지 않은 "예약중..." 상태 표시용
+  // (상대가 응답하면 이 일정은 지워지고, 확정이면 정식 약속 일정이 새로 생김)
+  isPendingHold     Boolean @default(false)
+  sourceMessageId   String? // 이 일정을 만든 예약/채팅 메시지 id - 확정된 약속이면 채팅으로 바로 이동할 때, 홀드면 응답 왔을 때 찾는 용도
+  sourceChatRoomId  String? // sourceMessageId가 있는 채팅방 id - "채팅에서 확인" 버튼에서 바로 그 방을 열 때 씀
+
+  // 매주 반복 일정용 - 요일 반복(0=일 ~ 6=토)이 있으면 이 일정은 반복 일정임.
+  // startTime/endTime은 "첫 번째 발생일"의 날짜+시간을 나타내고(반복 시작 기준일 + 매일 적용될 시간),
+  // recurringUntil이 있으면 그 날짜까지만, 없으면 계속 반복됨. 특정 날짜만 빼고 싶으면 recurringExceptions에 그 날짜를 담음.
+  recurringWeekdays   Int[]     @default([])
+  recurringUntil      DateTime?
+  recurringExceptions String[]  @default([]) // "YYYY-MM-DD" 형식 - 이 날짜들은 반복에서 제외됨
+
+  createdAt DateTime @default(now())
+
+  @@index([userId, startTime, endTime])
+  @@index([sourceMessageId])
+  @@map("events")
+}
+
+// ------------------------------------------------------------
+// PinnedItem (채팅방에 고정해둔 확정 일정/장소)
+// ------------------------------------------------------------
+model PinnedItem {
+  id              String   @id @default(uuid())
+  chatRoomId      String
+  chatRoom        ChatRoom @relation(fields: [chatRoomId], references: [id], onDelete: Cascade)
+  dateLabel       String?
+  timeLabel       String?
+  note            String?
+  location        String?
+  sourceMessageId String?
+  createdAt       DateTime @default(now())
+
+  @@index([chatRoomId])
+  @@map("pinned_items")
+}
+
+// ------------------------------------------------------------
+// FriendSettings (이 친구 한 명에 대한 내 기준 개별 설정 - 지금은 privateAccess 하나뿐)
+// ------------------------------------------------------------
+model FriendSettings {
+  id       String @id @default(uuid())
+  ownerId  String
+  owner    User   @relation("SettingsOwner", fields: [ownerId], references: [id], onDelete: Cascade)
+  friendId String
+  friend   User   @relation("SettingsFriend", fields: [friendId], references: [id], onDelete: Cascade)
+
+  // true면: owner가 "나만보기"로 표시해둔 일정도 이 friend한테는 그대로 보임 (예: 연인 등 특별히 더 공개하고 싶은 특정 친구 한 명/몇 명을 지정)
+  privateAccess Boolean @default(false)
+
+  @@unique([ownerId, friendId])
+  @@map("friend_settings")
+}
+
+// ------------------------------------------------------------
+// FriendGroup (인스타 "친한 친구"처럼, 내가 직접 이름 붙여 만드는 친구 그룹 - 일정 공개 대상으로 씀)
+// ------------------------------------------------------------
+model FriendGroup {
+  id        String   @id @default(uuid())
+  ownerId   String
+  owner     User     @relation("GroupOwner", fields: [ownerId], references: [id], onDelete: Cascade)
+  name      String
+  createdAt DateTime @default(now())
+
+  members FriendGroupMember[]
+
+  @@index([ownerId])
+  @@map("friend_groups")
+}
+
+// 그룹에 속한 친구 한 명 (한 친구가 여러 그룹에 동시에 속할 수 있음)
+model FriendGroupMember {
+  id       String      @id @default(uuid())
+  groupId  String
+  group    FriendGroup @relation(fields: [groupId], references: [id], onDelete: Cascade)
+  friendId String
+  friend   User        @relation("GroupMemberOf", fields: [friendId], references: [id], onDelete: Cascade)
+
+  @@unique([groupId, friendId])
+  @@map("friend_group_members")
+}
+
+// ------------------------------------------------------------
+// FeedPost (커뮤니티 소식 - 밥집/카페/액티비티 추천 글)
+// ------------------------------------------------------------
+// 장소 - 같은 가게에 대해 여러 사람이 리뷰를 남길 수 있도록, 게시물(리뷰)과 분리된 하나의 실체로 관리함
+model Place {
+  id             String    @id @default(uuid())
+  name           String // 상호명 (예: "빽다방 잠실새내점")
+  category       String // "food" | "cafe" | "experience"
+  location       String? // 동네/역 이름 등 사람이 보는 대략적 위치명
+  lat            Float?
+  lon            Float?
+  isSponsored    Boolean   @default(false) // 광고비를 낸 곳 - 목록 맨 위에 노출됨
+  sponsoredUntil DateTime? // 광고 노출 종료 시점 (지나면 자동으로 일반 노출로)
+  createdAt      DateTime  @default(now())
+
+  reviews FeedPost[]
+
+  @@map("places")
+}
+
+// 리뷰 - 한 장소(Place)에 대한 한 사람의 한줄 추천/리뷰
+model FeedPost {
+  id        String   @id @default(uuid())
+  authorId  String
+  author    User     @relation(fields: [authorId], references: [id], onDelete: Cascade)
+  placeId   String? // 예전 방식(장소 분리 이전)으로 만들어진 리뷰는 연결된 장소가 없을 수 있어서 선택 항목으로 둠
+  place     Place?   @relation(fields: [placeId], references: [id], onDelete: Cascade)
+  note      String?
+  createdAt DateTime @default(now())
+
+  @@map("feed_posts")
+}
+
+// ------------------------------------------------------------
+// Meetup (커뮤니티 - 모임)
+// ------------------------------------------------------------
+model Meetup {
+  id          String   @id @default(uuid())
+  creatorId   String
+  creator     User     @relation(fields: [creatorId], references: [id], onDelete: Cascade)
+  title       String
+  category    String // "food" | "cafe" | "experience" 등
+  location    String?
+  lat         Float?
+  lon         Float?
+  dateLabel   String?
+  timeLabel   String?
+  eventDate   DateTime? // 실제 모임 일시 (지난 모임 자동 숨김 판단에 사용)
+  description String?
+  maxParticipants Int  @default(6)
+  cancelled   Boolean  @default(false) // 만든 사람이 취소한 모임 - 목록엔 안 보이지만 기존 채팅방은 유지됨
+  chatRoomId  String?  @unique // 이 모임 전용 진짜 그룹 채팅방
+  chatRoom    ChatRoom? @relation(fields: [chatRoomId], references: [id])
+  createdAt   DateTime @default(now())
+
+  participants MeetupParticipant[]
+
+  @@map("meetups")
+}
+
+model MeetupParticipant {
+  id       String   @id @default(uuid())
+  meetupId String
+  meetup   Meetup   @relation(fields: [meetupId], references: [id], onDelete: Cascade)
+  userId   String
+  user     User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  status   String   @default("APPROVED") // "PENDING"(방장 수락 대기중) | "APPROVED"(정식 참여) | "DECLINED"(거절됨) - 모임장은 만들 때 자동 APPROVED
+  intro    String? // 신청할 때 남긴 자기소개 - 방장이 수락 여부 판단할 때 참고
+  joinedAt DateTime @default(now())
+
+  @@unique([meetupId, userId])
+  @@map("meetup_participants")
+}
+
+// ------------------------------------------------------------
+// UserSettings (설정 화면에서 바꾸는 모든 값 - 기기/새로고침과 무관하게 유지)
+// ------------------------------------------------------------
+model UserSettings {
+  id     String @id @default(uuid())
+  userId String @unique
+  user   User   @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  darkMode            Boolean @default(false)
+  defaultScheduleView String  @default("month") // "day" | "week" | "month"
+
+  privCalendarPublic Boolean @default(false) // 켜면 친구 캘린더에 일정 "제목"까지 노출
+  privStrangerChat   Boolean @default(false) // 아직 실제 기능은 없고 값만 저장됨
+
+  notifMessage   Boolean @default(true)
+  notifFriendreq Boolean @default(true)
+  notifMatched   Boolean @default(true)
+  notifMarketing Boolean @default(false)
+
+  friendAutoaccept  Boolean @default(false) // 켜면 받은 친구 요청이 즉시 자동 수락됨
+  friendSearchAllow Boolean @default(true) // 끄면 아이디 검색 결과에서 내가 제외됨
+
+  chatReadReceipt Boolean @default(true)
+  chatPreview     Boolean @default(true)
+
+  updatedAt DateTime @updatedAt
+
+  @@map("user_settings")
+}
+
+// ------------------------------------------------------------
+// Block (차단 - 차단하면 친구요청/채팅을 서로 못 함)
+// ------------------------------------------------------------
+model Block {
+  id        String   @id @default(uuid())
+  blockerId String
+  blocker   User     @relation("Blocker", fields: [blockerId], references: [id], onDelete: Cascade)
+  blockedId String
+  blocked   User     @relation("Blocked", fields: [blockedId], references: [id], onDelete: Cascade)
+  createdAt DateTime @default(now())
+
+  @@unique([blockerId, blockedId])
+  @@map("blocks")
+}
+
+// ------------------------------------------------------------
+// MatchingRoom (약속 방)
+// ------------------------------------------------------------
+model MatchingRoom {
+  id         String   @id @default(uuid())
+  creatorId  String
+  creator    User     @relation("RoomCreator", fields: [creatorId], references: [id])
+  title      String
+  rangeStart DateTime
+  rangeEnd   DateTime
+  shareLink  String   @unique @default(cuid())
+  createdAt  DateTime @default(now())
+
+  participants RoomParticipant[]
+
+  @@map("matching_rooms")
+}
+
+// ------------------------------------------------------------
+// RoomParticipant (방 참여자 - 회원/비회원 모두 지원)
+// ------------------------------------------------------------
+model RoomParticipant {
+  id     String       @id @default(uuid())
+  roomId String
+  room   MatchingRoom @relation(fields: [roomId], references: [id], onDelete: Cascade)
+
+  userId        String?
+  user          User?   @relation(fields: [userId], references: [id])
+  guestNickname String?
+
+  joinedAt DateTime @default(now())
+
+  @@unique([roomId, userId])
+  @@map("room_participants")
+}
