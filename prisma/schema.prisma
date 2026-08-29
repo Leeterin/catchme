@@ -57,6 +57,10 @@ model User {
   createdMeetups Meetup[]
   meetupJoins    MeetupParticipant[]
   feedPosts      FeedPost[]
+  feedPostLikes    FeedPostLike[]
+  feedPostComments FeedPostComment[]
+  reportsMade      Report[]
+  meetupReviews    MeetupReview[]
   timeProposalVotes TimeProposalVote[]
   friendSettingsGiven    FriendSettings[] @relation("SettingsOwner")
   friendSettingsReceived FriendSettings[] @relation("SettingsFriend")
@@ -380,9 +384,40 @@ model FeedPost {
   placeId   String? // 예전 방식(장소 분리 이전)으로 만들어진 리뷰는 연결된 장소가 없을 수 있어서 선택 항목으로 둠
   place     Place?   @relation(fields: [placeId], references: [id], onDelete: Cascade)
   note      String?
+  rating    Int? // 1~5점 별점 (예전 리뷰는 별점이 없을 수 있어서 선택 항목)
+  photos    String[] @default([]) // base64 이미지 문자열 배열 (최대 3장, 장당 대략 500KB 이하)
   createdAt DateTime @default(now())
 
+  likes    FeedPostLike[]
+  comments FeedPostComment[]
+
   @@map("feed_posts")
+}
+
+// 리뷰 좋아요 - 한 사람이 한 리뷰에 좋아요는 한 번만 누를 수 있음
+model FeedPostLike {
+  id        String   @id @default(uuid())
+  postId    String
+  post      FeedPost @relation(fields: [postId], references: [id], onDelete: Cascade)
+  userId    String
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  createdAt DateTime @default(now())
+
+  @@unique([postId, userId])
+  @@map("feed_post_likes")
+}
+
+// 리뷰 댓글
+model FeedPostComment {
+  id        String   @id @default(uuid())
+  postId    String
+  post      FeedPost @relation(fields: [postId], references: [id], onDelete: Cascade)
+  authorId  String
+  author    User     @relation(fields: [authorId], references: [id], onDelete: Cascade)
+  text      String
+  createdAt DateTime @default(now())
+
+  @@map("feed_post_comments")
 }
 
 // ------------------------------------------------------------
@@ -408,8 +443,24 @@ model Meetup {
   createdAt   DateTime @default(now())
 
   participants MeetupParticipant[]
+  reviews      MeetupReview[]
 
   @@map("meetups")
+}
+
+// 모임 후기 - 모임이 끝난 뒤 참여자가 남기는 평점/한줄평 (개인이 아닌 모임 경험 자체에 대한 평가)
+model MeetupReview {
+  id        String   @id @default(uuid())
+  meetupId  String
+  meetup    Meetup   @relation(fields: [meetupId], references: [id], onDelete: Cascade)
+  authorId  String
+  author    User     @relation(fields: [authorId], references: [id], onDelete: Cascade)
+  rating    Int // 1~5점
+  note      String?
+  createdAt DateTime @default(now())
+
+  @@unique([meetupId, authorId])
+  @@map("meetup_reviews")
 }
 
 model MeetupParticipant {
@@ -469,6 +520,22 @@ model Block {
 
   @@unique([blockerId, blockedId])
   @@map("blocks")
+}
+
+// 신고 - 리뷰, 모임, 사용자 등 여러 대상을 신고할 수 있는 범용 모델.
+// 지금은 자동으로 뭔가 처리되진 않고 기록만 남김 (나중에 관리자 화면에서 검토하는 걸 전제로 함)
+model Report {
+  id         String   @id @default(uuid())
+  reporterId String
+  reporter   User     @relation(fields: [reporterId], references: [id], onDelete: Cascade)
+  targetType String // "FEED_POST" | "MEETUP" | "USER"
+  targetId   String
+  reason     String
+  detail     String?
+  status     String   @default("PENDING") // "PENDING" | "REVIEWED" | "DISMISSED"
+  createdAt  DateTime @default(now())
+
+  @@map("reports")
 }
 
 // ------------------------------------------------------------

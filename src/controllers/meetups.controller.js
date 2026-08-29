@@ -40,23 +40,33 @@ function serializeMeetup(meetup, myUserId) {
 
 // GET /api/meetups?category=food|cafe|experience&lat=&lon=&radiusKm=  (생략하면 전체) - 취소된 모임/이미 지난 모임은 목록에서 제외
 async function listMeetups(req, res) {
-  const { category } = req.query;
+  const { category, q, sort } = req.query;
+  const where = {
+    OR: [{ eventDate: null }, { eventDate: { gte: new Date() } }], // 날짜를 안 정한 모임은 그대로 두고, 정한 모임은 지났으면 숨김
+    ...(category ? { category } : {}),
+  };
+  if (q && q.trim()) {
+    where.AND = [{ title: { contains: q.trim(), mode: 'insensitive' } }];
+  }
   const meetups = await prisma.meetup.findMany({
-    where: {
-      cancelled: false,
-      OR: [{ eventDate: null }, { eventDate: { gte: new Date() } }], // 날짜를 안 정한 모임은 그대로 두고, 정한 모임은 지났으면 숨김
-      ...(category ? { category } : {}),
-    },
+    where,
     include: {
       creator: { select: { id: true, username: true, name: true } },
       participants: { select: { userId: true, status: true } },
     },
-    orderBy: { createdAt: 'desc' },
+    orderBy: sort === 'deadline' ? { eventDate: 'asc' } : { createdAt: 'desc' },
+  });
+
+  // 취소된 모임은 완전히 감추지 않고, 나(방장이거나 신청/참여했던 적 있는 사람)한테는 "취소됨" 상태로 계속 보이게 함.
+  // 반대로 그 모임과 전혀 관련 없던 사람한테는 취소된 모임이 새로 발견되지 않도록 걸러냄.
+  const visibleMeetups = meetups.filter((m) => {
+    if (!m.cancelled) return true;
+    return m.creatorId === req.userId || m.participants.some((p) => p.userId === req.userId);
   });
 
   const lat = parseFloat(req.query.lat);
   const lon = parseFloat(req.query.lon);
-  let result = meetups.map((m) => serializeMeetup(m, req.userId));
+  let result = visibleMeetups.map((m) => serializeMeetup(m, req.userId));
 
   if (!Number.isNaN(lat) && !Number.isNaN(lon)) {
     const radiusKm = parseFloat(req.query.radiusKm) || 5;
@@ -64,8 +74,10 @@ async function listMeetups(req, res) {
     result = result
       .filter((m) => typeof m.lat === 'number' && typeof m.lon === 'number')
       .map((m) => ({ ...m, distanceKm: distanceKm(lat, lon, m.lat, m.lon) }))
-      .filter((m) => m.distanceKm <= radiusKm)
-      .sort((a, b) => a.distanceKm - b.distanceKm);
+      .filter((m) => m.distanceKm <= radiusKm);
+    if (sort !== 'recent' && sort !== 'deadline') {
+      result.sort((a, b) => a.distanceKm - b.distanceKm);
+    }
   }
 
   return res.json({ meetups: result });
@@ -119,6 +131,10 @@ async function createMeetup(req, res) {
       participants: { select: { userId: true, status: true } },
     },
   });
+
+  // 새 모임이 생겼다는 걸 접속중인 모든 사용자한테 알려서, 그 사람들 목록에도 새로고침 없이 바로 뜨게 함
+  const io = getIo();
+  if (io) io.emit('meetupCreated', { meetup: serializeMeetup(meetup, null) });
 
   return res.status(201).json({ meetup: serializeMeetup(meetup, req.userId) });
 }
@@ -289,20 +305,29 @@ async function respondToJoinRequest(req, res, approve) {
   if (!participant) return res.status(404).json({ message: '대기중인 신청을 찾을 수 없어요.' });
 
   if (approve) {
-    const approvedCount = meetup.participants.filter((p) => p.status === 'APPROVED').length;
-    if (approvedCount >= meetup.maxParticipants) {
-      return res.status(400).json({ message: '정원이 다 찼어요.' });
+    try {
+      await prisma.$transaction(async (tx) => {
+        // 같은 모임에 대한 승인 처리는 한 번에 하나씩만 진행되도록 잠금을 걺.
+        // (잠금 없이 "인원수 확인 -> 승인 처리"만 트랜잭션으로 묶어도, 서로 다른 신청 두 개를
+        // 거의 동시에 승인하면 둘 다 "아직 승인 전"인 상태로 인원수를 확인해버려서 정원을 넘길 수 있었음)
+        await tx.$executeRawUnsafe('SELECT pg_advisory_xact_lock(hashtext($1))', `meetup-approve:${id}`);
+        const freshApprovedCount = await tx.meetupParticipant.count({ where: { meetupId: id, status: 'APPROVED' } });
+        if (freshApprovedCount >= meetup.maxParticipants) {
+          throw Object.assign(new Error('정원이 다 찼어요.'), { statusCode: 400 });
+        }
+        await tx.meetupParticipant.update({ where: { id: participant.id }, data: { status: 'APPROVED' } });
+        if (meetup.chatRoomId) {
+          await tx.chatRoomMember.upsert({
+            where: { chatRoomId_userId: { chatRoomId: meetup.chatRoomId, userId } },
+            update: {},
+            create: { chatRoomId: meetup.chatRoomId, userId },
+          });
+        }
+      });
+    } catch (err) {
+      if (err.statusCode) return res.status(err.statusCode).json({ message: err.message });
+      throw err;
     }
-    await prisma.$transaction(async (tx) => {
-      await tx.meetupParticipant.update({ where: { id: participant.id }, data: { status: 'APPROVED' } });
-      if (meetup.chatRoomId) {
-        await tx.chatRoomMember.upsert({
-          where: { chatRoomId_userId: { chatRoomId: meetup.chatRoomId, userId } },
-          update: {},
-          create: { chatRoomId: meetup.chatRoomId, userId },
-        });
-      }
-    });
     notifyUser(userId, 'meetupJoinApproved', { meetupId: id, meetupTitle: meetup.title, chatRoomId: meetup.chatRoomId });
     return res.json({ message: '참여를 수락했어요.' });
   }
@@ -425,8 +450,58 @@ async function suggestedFriends(req, res) {
   return res.json({ suggestions });
 }
 
+// POST /api/meetups/:id/reviews   body: { rating, note? }
+// 모임이 끝난 뒤(eventDate가 지난 뒤), 참여했던 사람(방장 포함)만 후기를 남길 수 있음.
+// 이미 남긴 적 있으면 그 후기가 수정됨 (한 모임에 한 사람당 후기는 하나)
+async function createMeetupReview(req, res) {
+  const { id } = req.params;
+  const { rating, note } = req.body;
+
+  if (typeof rating !== 'number' || !Number.isInteger(rating) || rating < 1 || rating > 5) {
+    return res.status(400).json({ message: '별점은 1~5 사이의 정수여야 해요.' });
+  }
+
+  const meetup = await prisma.meetup.findUnique({ where: { id }, include: { participants: true } });
+  if (!meetup) return res.status(404).json({ message: '모임을 찾을 수 없어요.' });
+
+  const isInvolved = meetup.creatorId === req.userId
+    || meetup.participants.some((p) => p.userId === req.userId && p.status === 'APPROVED');
+  if (!isInvolved) {
+    return res.status(403).json({ message: '참여했던 모임에만 후기를 남길 수 있어요.' });
+  }
+  if (meetup.eventDate && new Date(meetup.eventDate) > new Date()) {
+    return res.status(400).json({ message: '모임이 끝난 뒤에 후기를 남길 수 있어요.' });
+  }
+
+  const review = await prisma.meetupReview.upsert({
+    where: { meetupId_authorId: { meetupId: id, authorId: req.userId } },
+    update: { rating, note: note || null },
+    create: { meetupId: id, authorId: req.userId, rating, note: note || null },
+    include: { author: { select: { id: true, username: true, name: true } } },
+  });
+
+  return res.status(201).json({
+    review: { id: review.id, meetupId: review.meetupId, rating: review.rating, note: review.note, author: review.author, createdAt: review.createdAt },
+  });
+}
+
+// GET /api/meetups/:id/reviews  - 그 모임에 달린 후기 전체 (평균 별점 포함)
+async function listMeetupReviews(req, res) {
+  const { id } = req.params;
+  const reviews = await prisma.meetupReview.findMany({
+    where: { meetupId: id },
+    include: { author: { select: { id: true, username: true, name: true } } },
+    orderBy: { createdAt: 'desc' },
+  });
+  const avgRating = reviews.length > 0 ? reviews.reduce((sum, r) => sum + r.rating, 0) / reviews.length : null;
+  return res.json({
+    avgRating: avgRating !== null ? Math.round(avgRating * 10) / 10 : null,
+    reviews: reviews.map((r) => ({ id: r.id, rating: r.rating, note: r.note, author: r.author, createdAt: r.createdAt })),
+  });
+}
+
 module.exports = {
   listMeetups, createMeetup, updateMeetup, cancelMeetup,
   joinMeetup, leaveMeetup, listJoinRequests, approveJoinRequest, declineJoinRequest,
-  suggestedFriends,
+  suggestedFriends, createMeetupReview, listMeetupReviews,
 };

@@ -3,7 +3,7 @@ const { requireAuth } = require('../middleware/auth.middleware');
 const {
   listMeetups, createMeetup, updateMeetup, cancelMeetup,
   joinMeetup, leaveMeetup, listJoinRequests, approveJoinRequest, declineJoinRequest,
-  suggestedFriends,
+  suggestedFriends, createMeetupReview, listMeetupReviews,
 } = require('../controllers/meetups.controller');
 
 const router = express.Router();
@@ -20,5 +20,7 @@ router.post('/:id/leave', leaveMeetup);
 router.get('/:id/requests', listJoinRequests);
 router.post('/:id/requests/:userId/approve', approveJoinRequest);
 router.post('/:id/requests/:userId/decline', declineJoinRequest);
+router.post('/:id/reviews', createMeetupReview);
+router.get('/:id/reviews', listMeetupReviews);
 
 module.exports = router;

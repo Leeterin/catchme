@@ -19,6 +19,7 @@ const profileRoutes = require('./routes/profile.routes');
 const meetupsRoutes = require('./routes/meetups.routes');
 const settingsRoutes = require('./routes/settings.routes');
 const feedRoutes = require('./routes/feed.routes');
+const reportsRoutes = require('./routes/reports.routes');
 const { errorHandler, notFoundHandler } = require('./middleware/errorHandler');
 const { setIo } = require('./lib/socket');
 
@@ -74,6 +75,7 @@ app.use('/api/profile', profileRoutes);
 app.use('/api/meetups', meetupsRoutes);
 app.use('/api/settings', settingsRoutes);
 app.use('/api/feed', feedRoutes);
+app.use('/api/reports', reportsRoutes);
 app.use('/api/users', require('./routes/avatar.routes'));
 
 app.use(notFoundHandler);
