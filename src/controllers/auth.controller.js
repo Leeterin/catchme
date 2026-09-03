@@ -218,17 +218,36 @@ async function findOrCreateSocialUser({ provider, providerId, email, name }) {
   return { token, refreshToken };
 }
 
+// 카카오/네이버 로그인 시작~콜백 사이에 이 콜백 요청이 정말 우리가 보낸 리다이렉트에서 돌아온 게 맞는지
+// 확인하는 CSRF 방지용 state. 서버에 따로 저장(세션/쿠키)하지 않고, JWT로 서명해서 그 안에 실어 보냄 -
+// 콜백에서는 서명과 provider가 일치하는지만 검증하면 되니 별도 저장소 없이도 위조를 막을 수 있음.
+// 유효시간은 로그인 화면에서 승인하는 데 걸리는 시간을 넉넉히 잡아 10분으로 둠.
+function signOAuthState(provider) {
+  return jwt.sign({ provider, nonce: crypto.randomBytes(8).toString('hex') }, process.env.JWT_SECRET, { expiresIn: '10m' });
+}
+function verifyOAuthState(provider, state) {
+  if (!state) return false;
+  try {
+    const payload = jwt.verify(state, process.env.JWT_SECRET);
+    return payload.provider === provider;
+  } catch (err) {
+    return false;
+  }
+}
+
 // GET /api/auth/kakao/login — 카카오 로그인 화면으로 리다이렉트
 function kakaoLoginRedirect(req, res) {
-  const url = `https://kauth.kakao.com/oauth/authorize?response_type=code&client_id=${process.env.KAKAO_REST_API_KEY}&redirect_uri=${encodeURIComponent(process.env.KAKAO_REDIRECT_URI)}`;
+  const state = signOAuthState('kakao');
+  const url = `https://kauth.kakao.com/oauth/authorize?response_type=code&client_id=${process.env.KAKAO_REST_API_KEY}&redirect_uri=${encodeURIComponent(process.env.KAKAO_REDIRECT_URI)}&state=${encodeURIComponent(state)}`;
   res.redirect(url);
 }
 
-// GET /api/auth/kakao/callback?code=... — 카카오 로그인 후 돌아오는 콜백
+// GET /api/auth/kakao/callback?code=&state= — 카카오 로그인 후 돌아오는 콜백
 async function kakaoCallback(req, res) {
-  const { code } = req.query;
+  const { code, state } = req.query;
   const frontendUrl = process.env.FRONTEND_URL || '/';
   if (!code) return res.redirect(`${frontendUrl}?authError=missing_code`);
+  if (!verifyOAuthState('kakao', state)) return res.redirect(`${frontendUrl}?authError=invalid_state`);
 
   try {
     const tokenRes = await fetch('https://kauth.kakao.com/oauth/token', {
@@ -266,8 +285,8 @@ async function kakaoCallback(req, res) {
 
 // GET /api/auth/naver/login — 네이버 로그인 화면으로 리다이렉트
 function naverLoginRedirect(req, res) {
-  const state = crypto.randomBytes(8).toString('hex');
-  const url = `https://nid.naver.com/oauth2.0/authorize?response_type=code&client_id=${process.env.NAVER_LOGIN_CLIENT_ID}&redirect_uri=${encodeURIComponent(process.env.NAVER_REDIRECT_URI)}&state=${state}`;
+  const state = signOAuthState('naver');
+  const url = `https://nid.naver.com/oauth2.0/authorize?response_type=code&client_id=${process.env.NAVER_LOGIN_CLIENT_ID}&redirect_uri=${encodeURIComponent(process.env.NAVER_REDIRECT_URI)}&state=${encodeURIComponent(state)}`;
   res.redirect(url);
 }
 
@@ -276,6 +295,7 @@ async function naverCallback(req, res) {
   const { code, state } = req.query;
   const frontendUrl = process.env.FRONTEND_URL || '/';
   if (!code) return res.redirect(`${frontendUrl}?authError=missing_code`);
+  if (!verifyOAuthState('naver', state)) return res.redirect(`${frontendUrl}?authError=invalid_state`);
 
   try {
     const tokenUrl = `https://nid.naver.com/oauth2.0/token?grant_type=authorization_code&client_id=${process.env.NAVER_LOGIN_CLIENT_ID}&client_secret=${process.env.NAVER_LOGIN_CLIENT_SECRET}&code=${code}&state=${state}`;

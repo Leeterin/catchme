@@ -136,8 +136,11 @@ async function matchCalendar(req, res) {
         if (ev.recurringExceptions && ev.recurringExceptions.includes(dateKey)) return false;
         if (ev.recurringUntil && kstDate(dateKey, 0, 0) > new Date(ev.recurringUntil)) return false;
         // 시간(시:분)은 원래 저장된 그대로, 날짜만 지금 확인 중인 날로 다시 계산해서 비교
+        // 종료 시각은 그날 날짜 + 원래 끝나던 시:분이 아니라, 시작 시각 + 원래 지속 시간으로 구함 -
+        // 자정 넘기는 반복 일정(예: 23:00~01:00)은 끝나는 시:분이 시작보다 빨라서, 그대로 쓰면 종료가
+        // 시작보다 앞선 뒤집힌 구간이 돼버림.
         const occStart = kstDate(dateKey, ev.startTime.getHours(), ev.startTime.getMinutes());
-        const occEnd = kstDate(dateKey, ev.endTime.getHours(), ev.endTime.getMinutes());
+        const occEnd = new Date(occStart.getTime() + (new Date(ev.endTime).getTime() - new Date(ev.startTime).getTime()));
         return occStart < slotEnd && occEnd > slotStart;
       }
       return new Date(ev.startTime) < slotEnd && new Date(ev.endTime) > slotStart;
@@ -157,8 +160,11 @@ async function matchCalendar(req, res) {
         if (!ev.recurringWeekdays.includes(dow)) return false;
         if (ev.recurringExceptions && ev.recurringExceptions.includes(dateKey)) return false;
         if (ev.recurringUntil && kstDate(dateKey, 0, 0) > new Date(ev.recurringUntil)) return false;
+        // 종료 시각은 그날 날짜 + 원래 끝나던 시:분이 아니라, 시작 시각 + 원래 지속 시간으로 구함 -
+        // 자정 넘기는 반복 일정(예: 23:00~01:00)은 끝나는 시:분이 시작보다 빨라서, 그대로 쓰면 종료가
+        // 시작보다 앞선 뒤집힌 구간이 돼버림.
         const occStart = kstDate(dateKey, ev.startTime.getHours(), ev.startTime.getMinutes());
-        const occEnd = kstDate(dateKey, ev.endTime.getHours(), ev.endTime.getMinutes());
+        const occEnd = new Date(occStart.getTime() + (new Date(ev.endTime).getTime() - new Date(ev.startTime).getTime()));
         return occStart < slotEnd && occEnd > slotStart;
       }
       return new Date(ev.startTime) < slotEnd && new Date(ev.endTime) > slotStart;
@@ -459,10 +465,15 @@ async function getFriendDaySchedule(req, res) {
       if (ev.recurringWeekdays.length === 0) return ev;
       if (!ev.recurringWeekdays.includes(dow)) return null;
       if (ev.recurringExceptions.includes(date)) return null;
+      // 종료 시각은 "이 날짜 + 원래 끝나던 시:분"이 아니라 "새로 계산한 시작 시각 + 원래 지속 시간"으로 구함 -
+      // 자정을 넘기는 반복 일정(예: 23:00~01:00)은 끝나는 시:분이 시작보다 빠르기 때문에, 그날 날짜를 그대로
+      // 끝 시각에도 써버리면 종료가 시작보다 앞서는(음수 지속시간) 뒤집힌 구간이 돼서 매칭 계산이 깨짐.
+      const occStart = kstDate(date, ev.startTime.getHours(), ev.startTime.getMinutes());
+      const occEnd = new Date(occStart.getTime() + (new Date(ev.endTime).getTime() - new Date(ev.startTime).getTime()));
       return {
         ...ev,
-        startTime: kstDate(date, ev.startTime.getHours(), ev.startTime.getMinutes()),
-        endTime: kstDate(date, ev.endTime.getHours(), ev.endTime.getMinutes()),
+        startTime: occStart,
+        endTime: occEnd,
       };
     })
     .filter(Boolean);
@@ -572,10 +583,12 @@ async function getFriendMonthSchedule(req, res) {
         if (ev.recurringWeekdays.length === 0) return ev;
         if (!ev.recurringWeekdays.includes(dow)) return null;
         if (ev.recurringExceptions.includes(dateKey)) return null;
+        // (자정 넘기는 반복 일정 보정 - 위 getFriendDaySchedule과 같은 이유)
+        const occStart = kstDate(dateKey, ev.startTime.getHours(), ev.startTime.getMinutes());
         return {
           ...ev,
-          startTime: kstDate(dateKey, ev.startTime.getHours(), ev.startTime.getMinutes()),
-          endTime: kstDate(dateKey, ev.endTime.getHours(), ev.endTime.getMinutes()),
+          startTime: occStart,
+          endTime: new Date(occStart.getTime() + (new Date(ev.endTime).getTime() - new Date(ev.startTime).getTime())),
         };
       })
       .filter(Boolean);

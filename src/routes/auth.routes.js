@@ -1,11 +1,13 @@
 const express = require('express');
 const { requireAuth } = require('../middleware/auth.middleware');
 const { loginLimiter, signupLimiter, passwordResetLimiter } = require('../middleware/rateLimit.middleware');
+const asyncHandler = require('../lib/asyncHandler');
+// 컨트롤러의 모든 함수를 asyncHandler로 감싸서, async 핸들러 안의 에러가 항상 errorHandler로 넘어가게 함
 const {
   signup, login, checkUsername, refresh, logout, getMe,
   kakaoLoginRedirect, kakaoCallback, naverLoginRedirect, naverCallback,
   forgotPassword, resetPassword,
-} = require('../controllers/auth.controller');
+} = Object.fromEntries(Object.entries(require('../controllers/auth.controller')).map(([k, v]) => [k, asyncHandler(v)]));
 
 const router = express.Router();
 

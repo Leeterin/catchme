@@ -1,6 +1,7 @@
 const express = require('express');
 const { requireAuth } = require('../middleware/auth.middleware');
-const { createReport, getTrustInfo } = require('../controllers/reports.controller');
+const asyncHandler = require('../lib/asyncHandler');
+const { createReport, getTrustInfo } = Object.fromEntries(Object.entries(require('../controllers/reports.controller')).map(([k, v]) => [k, asyncHandler(v)]));
 
 const router = express.Router();
 

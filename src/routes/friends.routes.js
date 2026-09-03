@@ -1,5 +1,6 @@
 const express = require('express');
 const { requireAuth } = require('../middleware/auth.middleware');
+const asyncHandler = require('../lib/asyncHandler');
 const {
   searchUsers,
   listFriends,
@@ -19,7 +20,7 @@ const {
   renameGroup,
   deleteGroup,
   setGroupMembers,
-} = require('../controllers/friends.controller');
+} = Object.fromEntries(Object.entries(require('../controllers/friends.controller')).map(([k, v]) => [k, asyncHandler(v)]));
 
 const router = express.Router();
 

@@ -1,9 +1,10 @@
 const express = require('express');
 const { requireAuth } = require('../middleware/auth.middleware');
+const asyncHandler = require('../lib/asyncHandler');
 const {
   listFeedPosts, getPlaceDetail, createFeedPost, updateFeedPost, deleteFeedPost,
   toggleLike, listComments, createComment, deleteComment,
-} = require('../controllers/feed.controller');
+} = Object.fromEntries(Object.entries(require('../controllers/feed.controller')).map(([k, v]) => [k, asyncHandler(v)]));
 
 const router = express.Router();
 

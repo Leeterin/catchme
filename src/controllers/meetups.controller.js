@@ -343,6 +343,15 @@ const declineJoinRequest = (req, res) => respondToJoinRequest(req, res, false);
 async function leaveMeetup(req, res) {
   const { id } = req.params;
   const meetup = await prisma.meetup.findUnique({ where: { id } });
+  if (!meetup) {
+    return res.status(404).json({ message: '모임을 찾을 수 없어요.' });
+  }
+  // 모임장은 그냥 나가버리면 안 됨 - 참가자 목록/채팅방에서는 빠지는데 수정/취소/신청 수락·거절 같은
+  // 관리 권한(creatorId 기준 체크)은 그대로 남아있게 돼서, 모임에 없는 사람이 계속 모임을 관리하는
+  // 상태가 됨. 모임장은 "모임 취소"로만 정리할 수 있게 함.
+  if (meetup.creatorId === req.userId) {
+    return res.status(400).json({ message: '모임장은 모임을 나갈 수 없어요. 모임을 취소해주세요.' });
+  }
   await prisma.meetupParticipant.deleteMany({ where: { meetupId: id, userId: req.userId } });
   if (meetup && meetup.chatRoomId) {
     await prisma.chatRoomMember.deleteMany({ where: { chatRoomId: meetup.chatRoomId, userId: req.userId } });
@@ -374,6 +383,7 @@ async function suggestedFriends(req, res) {
     const nearbyUsers = await prisma.user.findMany({
       where: {
         id: { notIn: [req.userId, ...excluded] },
+        locationSharing: true,
         lastLat: { not: null },
         lastLon: { not: null },
         OR: [{ settings: null }, { settings: { friendSearchAllow: true } }],

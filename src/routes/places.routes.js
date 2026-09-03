@@ -1,6 +1,7 @@
 const express = require('express');
 const { requireAuth } = require('../middleware/auth.middleware');
-const { searchPlaces } = require('../controllers/places.controller');
+const asyncHandler = require('../lib/asyncHandler');
+const { searchPlaces } = Object.fromEntries(Object.entries(require('../controllers/places.controller')).map(([k, v]) => [k, asyncHandler(v)]));
 
 const router = express.Router();
 

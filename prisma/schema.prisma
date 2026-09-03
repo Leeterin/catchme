@@ -544,7 +544,7 @@ model Report {
 model MatchingRoom {
   id         String   @id @default(uuid())
   creatorId  String
-  creator    User     @relation("RoomCreator", fields: [creatorId], references: [id])
+  creator    User     @relation("RoomCreator", fields: [creatorId], references: [id], onDelete: Cascade)
   title      String
   rangeStart DateTime
   rangeEnd   DateTime
