@@ -64,7 +64,10 @@ app.use('/api', rateLimit({
   message: { message: '요청이 너무 많아요. 잠시 후 다시 시도해주세요.' },
 }));
 
-app.get('/health', (req, res) => res.json({ ok: true }));
+// commit(RENDER_GIT_COMMIT)까지 같이 보여줘서, "지금 떠있는 서버가 정확히 어느 커밋인지"를
+// 배포 후 매번 다른 기능으로 우회 확인할 필요 없이 이 한 endpoint로 바로 확인할 수 있게 함.
+// (Render가 배포할 때마다 이 환경변수를 자동으로 채워줌 - 로컬/다른 호스팅에서는 그냥 없어서 null)
+app.get('/health', (req, res) => res.json({ ok: true, commit: process.env.RENDER_GIT_COMMIT || null }));
 
 app.use('/api/auth', authRoutes);
 app.use('/api/friends', friendsRoutes);
