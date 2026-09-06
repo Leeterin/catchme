@@ -87,6 +87,8 @@ function isCurrentlySponsored(place) {
 function serializePlace(place, refLocation, myUserId) {
   const reviews = place.reviews || [];
   const latest = reviews[0] || null;
+  // reviews는 createdAt desc로 오므로, 배열의 마지막 = 이 장소에 가장 먼저 올라온(원조) 리뷰
+  const primary = reviews.length > 0 ? reviews[reviews.length - 1] : null;
   const rated = reviews.filter((r) => typeof r.rating === 'number');
   const avgRating = rated.length > 0 ? rated.reduce((sum, r) => sum + r.rating, 0) / rated.length : null;
   const totalLikes = reviews.reduce((sum, r) => sum + (r.likes ? r.likes.length : 0), 0);
@@ -102,6 +104,7 @@ function serializePlace(place, refLocation, myUserId) {
     avgRating: avgRating !== null ? Math.round(avgRating * 10) / 10 : null,
     totalLikes,
     latestReview: latest ? serializeReview(latest, myUserId) : null,
+    primaryReview: primary ? serializeReview(primary, myUserId) : null,
     createdAt: place.createdAt,
   };
   if (refLocation && typeof place.lat === 'number' && typeof place.lon === 'number') {
