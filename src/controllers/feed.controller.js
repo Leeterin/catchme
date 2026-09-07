@@ -282,7 +282,8 @@ async function updateFeedPost(req, res) {
   return res.json({ post: serializeReview(updated, req.userId) });
 }
 
-// DELETE /api/feed/:id  - 작성자 본인만 삭제 가능 (장소 자체는 다른 사람 리뷰가 있으면 계속 남아있음)
+// DELETE /api/feed/:id  - 작성자 본인만 삭제 가능. 지우고 나서 그 장소에 리뷰가 하나도 안 남으면
+// (그리고 광고로 노출 중인 장소가 아니면) 빈 장소 카드가 소식 피드에 계속 남지 않도록 장소 자체도 같이 지움.
 async function deleteFeedPost(req, res) {
   const { id } = req.params;
   const post = await prisma.feedPost.findUnique({ where: { id } });
@@ -291,6 +292,15 @@ async function deleteFeedPost(req, res) {
     return res.status(403).json({ message: '작성자만 삭제할 수 있어요.' });
   }
   await prisma.feedPost.delete({ where: { id } });
+
+  const remaining = await prisma.feedPost.count({ where: { placeId: post.placeId } });
+  if (remaining === 0) {
+    const place = await prisma.place.findUnique({ where: { id: post.placeId } });
+    if (place && !isCurrentlySponsored(place)) {
+      await prisma.place.delete({ where: { id: post.placeId } });
+      return res.json({ message: '삭제했어요.', placeDeleted: true, placeId: post.placeId });
+    }
+  }
   return res.json({ message: '리뷰를 삭제했어요.' });
 }
 
