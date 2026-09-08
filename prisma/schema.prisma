@@ -376,15 +376,20 @@ model Place {
   @@map("places")
 }
 
-// 리뷰 - 한 장소(Place)에 대한 한 사람의 한줄 추천/리뷰
+// 소식 게시물 - 각자 올린 글이 독립적인 하나의 게시물로 따로 보임 (더 이상 같은 장소끼리 묶지 않음)
 model FeedPost {
   id        String   @id @default(uuid())
   authorId  String
   author    User     @relation(fields: [authorId], references: [id], onDelete: Cascade)
-  placeId   String? // 예전 방식(장소 분리 이전)으로 만들어진 리뷰는 연결된 장소가 없을 수 있어서 선택 항목으로 둠
+  placeId   String? // 예전 방식(장소로 묶던 시절)의 흔적 - 새 게시물은 안 씀, 과거 데이터 호환용으로만 남겨둠
   place     Place?   @relation(fields: [placeId], references: [id], onDelete: Cascade)
+  category  String? // "food" | "cafe" | "experience" - 게시물 자체에 직접 저장함
+  title     String? // 제목 (상호명 등) - 게시물 자체에 직접 저장함
+  location  String? // 동네/역 이름 등
+  lat       Float?
+  lon       Float?
   note      String?
-  rating    Int? // 1~5점 별점 (예전 리뷰는 별점이 없을 수 있어서 선택 항목)
+  rating    Int? // 1~5점 별점 (선택)
   photos    String[] @default([]) // base64 이미지 문자열 배열 (최대 3장, 장당 대략 500KB 이하)
   createdAt DateTime @default(now())
 
@@ -544,7 +549,7 @@ model Report {
 model MatchingRoom {
   id         String   @id @default(uuid())
   creatorId  String
-  creator    User     @relation("RoomCreator", fields: [creatorId], references: [id], onDelete: Cascade)
+  creator    User     @relation("RoomCreator", fields: [creatorId], references: [id])
   title      String
   rangeStart DateTime
   rangeEnd   DateTime

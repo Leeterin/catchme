@@ -1,7 +1,6 @@
 const express = require('express');
 const { requireAuth } = require('../middleware/auth.middleware');
-const asyncHandler = require('../lib/asyncHandler');
-const { listEvents, getEvent, createEvent, updateEvent, deleteEvent, matchCalendar, getFriendDaySchedule, getFriendMonthSchedule } = Object.fromEntries(Object.entries(require('../controllers/events.controller')).map(([k, v]) => [k, asyncHandler(v)]));
+const { listEvents, getEvent, createEvent, updateEvent, deleteEvent, matchCalendar, getFriendDaySchedule, getFriendMonthSchedule } = require('../controllers/events.controller');
 
 const router = express.Router();
 

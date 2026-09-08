@@ -1,7 +1,7 @@
 const bcrypt = require('bcryptjs');
 const prisma = require('../lib/prisma');
 const { toPublicUser } = require('./auth.controller');
-const { USERNAME_RE, PHONE_RE } = require('../lib/validators');
+const { USERNAME_RE } = require('../lib/validators');
 
 // 프로필 이미지는 외부 저장소 없이 DB에 base64 문자열로 바로 저장한다.
 // 원본을 그대로 넣으면 너무 커지므로, 프론트에서 작게 압축(리사이즈)한 걸 받는 걸 전제로 하고
@@ -15,14 +15,7 @@ async function updateProfile(req, res) {
 
   if (typeof name === 'string' && name.trim()) data.name = name.trim();
   if (typeof bio === 'string') data.bio = bio;
-  if (typeof phone === 'string') {
-    // 회원가입 때(validateSignupInput)와 똑같은 형식 검증을 여기서도 적용 - 안 그러면 가입 땐 막던
-    // 잘못된 형식의 전화번호가 프로필 수정으로는 그냥 저장돼버림. 빈 문자열은 "번호 지우기"로 허용.
-    if (phone && !PHONE_RE.test(phone)) {
-      return res.status(400).json({ message: '전화번호 형식이 올바르지 않아요. (예: 010-1234-5678)' });
-    }
-    data.phone = phone;
-  }
+  if (typeof phone === 'string') data.phone = phone;
   if (typeof phonePublic === 'boolean') data.phonePublic = phonePublic;
   if (typeof emailPublic === 'boolean') data.emailPublic = emailPublic;
 
@@ -56,18 +49,8 @@ async function updateProfile(req, res) {
     return res.status(400).json({ message: '변경할 내용이 없어요.' });
   }
 
-  try {
-    const user = await prisma.user.update({ where: { id: req.userId }, data });
-    return res.json({ user: toPublicUser(user) });
-  } catch (err) {
-    // 위에서 중복 확인을 이미 했어도, 그 확인과 실제 저장 사이에 다른 요청이 같은 아이디를 먼저 가져가버리는
-    // 극히 드문 경쟁 상태가 있을 수 있음 - 그 경우 DB의 유니크 제약(P2002)이 대신 막아주므로, 그걸 500이 아니라
-    // 이미 위에서 쓰던 것과 같은 409 응답으로 바꿔서 사용자에게 자연스럽게 보여줌.
-    if (err.code === 'P2002') {
-      return res.status(409).json({ message: '이미 사용 중인 아이디예요.' });
-    }
-    throw err;
-  }
+  const user = await prisma.user.update({ where: { id: req.userId }, data });
+  return res.json({ user: toPublicUser(user) });
 }
 
 // PATCH /api/profile/location   body: { lat, lon }  - 커뮤니티 화면에서 "현위치"를 선택했을 때 내 최근 위치를 저장
@@ -79,12 +62,8 @@ async function updateLocation(req, res) {
   if (lat < -90 || lat > 90 || lon < -180 || lon > 180) {
     return res.status(400).json({ message: '위치 좌표가 올바르지 않아요.' });
   }
-  // sharing이 false로 오면(동의 철회) 좌표 자체를 지움 - locationSharing만 꺼두고 좌표는 남겨두면,
-  // 나중에 다른 곳(예: 모임 주변 추천)에서 "꺼져있는지"를 깜빡하고 안 챙기는 코드가 하나라도 있으면
-  // 그 순간 예전 좌표가 그대로 새어나감. 좌표 자체가 없으면 그런 실수를 해도 새어나갈 게 없음.
-  const data = sharing === false
-    ? { locationSharing: false, lastLat: null, lastLon: null, lastLocatedAt: null }
-    : { lastLat: lat, lastLon: lon, lastLocatedAt: new Date(), ...(typeof sharing === 'boolean' ? { locationSharing: sharing } : {}) };
+  const data = { lastLat: lat, lastLon: lon, lastLocatedAt: new Date() };
+  if (typeof sharing === 'boolean') data.locationSharing = sharing;
   await prisma.user.update({ where: { id: req.userId }, data });
   return res.json({ message: '위치를 저장했어요.' });
 }

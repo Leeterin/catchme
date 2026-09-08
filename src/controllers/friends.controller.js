@@ -363,69 +363,54 @@ async function sendRequest(req, res) {
   const receiverSettings = await prisma.userSettings.findUnique({ where: { userId: receiver.id } });
   const autoAccept = !!(receiverSettings && receiverSettings.friendAutoaccept);
 
-  // "이미 요청이 있는지 확인 -> 없으면 생성"이 원자적이지 않으면, 두 사람이 거의 동시에 서로에게
-  // 요청을 보낼 때 둘 다 "없음"을 보고 그대로 진행해서 반대 방향 요청이 중복으로 남을 수 있음
-  // (senderId/receiverId 유니크 제약은 같은 방향 중복만 막아줌). Serializable 트랜잭션으로 묶어서
-  // 이런 경쟁이 생기면 DB가 둘 중 하나를 실패시키게 하고, 그 실패를 잡아서 409로 자연스럽게 응답함.
-  let result;
-  try {
-    result = await prisma.$transaction(async (tx) => {
-      const existing = await tx.friendRequest.findFirst({
-        where: {
-          OR: [
-            { senderId: req.userId, receiverId: receiver.id },
-            { senderId: receiver.id, receiverId: req.userId },
-          ],
-        },
-      });
+  // 이미 어느 방향으로든 요청이 있었는지 확인 (수락된 관계 포함)
+  const existing = await prisma.friendRequest.findFirst({
+    where: {
+      OR: [
+        { senderId: req.userId, receiverId: receiver.id },
+        { senderId: receiver.id, receiverId: req.userId },
+      ],
+    },
+  });
 
-      if (existing) {
-        if (existing.status === 'ACCEPTED') {
-          return { conflict: '이미 친구예요.' };
-        }
-        if (existing.status === 'PENDING') {
-          return { conflict: '이미 친구 요청을 보냈거나 받은 상태예요.' };
-        }
-        // 예전에 거절됐던 요청이면 다시 PENDING(또는 자동수락이면 ACCEPTED)으로 재사용
-        const revived = await tx.friendRequest.update({
-          where: { id: existing.id },
-          data: {
-            status: autoAccept ? 'ACCEPTED' : 'PENDING',
-            senderId: req.userId,
-            receiverId: receiver.id,
-            respondedAt: autoAccept ? new Date() : null,
-          },
-        });
-        return { requestId: revived.id };
-      }
-
-      const created = await tx.friendRequest.create({
-        data: {
-          senderId: req.userId,
-          receiverId: receiver.id,
-          status: autoAccept ? 'ACCEPTED' : 'PENDING',
-          respondedAt: autoAccept ? new Date() : null,
-        },
-      });
-      return { requestId: created.id };
-    }, { isolationLevel: 'Serializable' });
-  } catch (err) {
-    // Postgres가 serializable 충돌을 감지해서 트랜잭션을 실패시킨 경우 - 진짜로 거의 동시에 서로
-    // 요청을 보낸 드문 경우이므로, 500이 아니라 다시 시도해달라는 안내로 자연스럽게 응답함
-    if (err.code === 'P2034') {
-      return res.status(409).json({ message: '거의 동시에 요청이 처리됐어요. 잠시 후 다시 시도해주세요.' });
+  if (existing) {
+    if (existing.status === 'ACCEPTED') {
+      return res.status(409).json({ message: '이미 친구예요.' });
     }
-    throw err;
+    if (existing.status === 'PENDING') {
+      return res.status(409).json({ message: '이미 친구 요청을 보냈거나 받은 상태예요.' });
+    }
+    // 예전에 거절됐던 요청이면 다시 PENDING(또는 자동수락이면 ACCEPTED)으로 재사용
+    const revived = await prisma.friendRequest.update({
+      where: { id: existing.id },
+      data: {
+        status: autoAccept ? 'ACCEPTED' : 'PENDING',
+        senderId: req.userId,
+        receiverId: receiver.id,
+        respondedAt: autoAccept ? new Date() : null,
+      },
+    });
+    notifyUser(receiver.id, autoAccept ? 'friendsChanged' : 'friendRequestReceived', {});
+    return res.status(201).json({
+      message: autoAccept ? '친구가 됐어요! (상대방이 자동 수락을 켜뒀어요)' : '친구 요청을 보냈어요.',
+      requestId: revived.id,
+    });
   }
 
-  if (result.conflict) {
-    return res.status(409).json({ message: result.conflict });
-  }
+  const created = await prisma.friendRequest.create({
+    data: {
+      senderId: req.userId,
+      receiverId: receiver.id,
+      status: autoAccept ? 'ACCEPTED' : 'PENDING',
+      respondedAt: autoAccept ? new Date() : null,
+    },
+  });
   // 받는 사람한테 실시간으로 알려줘서, 새로고침 안 해도 "받은 요청" 목록에 바로 뜨게 함
   notifyUser(receiver.id, autoAccept ? 'friendsChanged' : 'friendRequestReceived', {});
+
   return res.status(201).json({
     message: autoAccept ? '친구가 됐어요! (상대방이 자동 수락을 켜뒀어요)' : '친구 요청을 보냈어요.',
-    requestId: result.requestId,
+    requestId: created.id,
   });
 }
 

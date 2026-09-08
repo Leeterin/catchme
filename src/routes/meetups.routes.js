@@ -1,11 +1,10 @@
 const express = require('express');
 const { requireAuth } = require('../middleware/auth.middleware');
-const asyncHandler = require('../lib/asyncHandler');
 const {
   listMeetups, createMeetup, updateMeetup, cancelMeetup,
   joinMeetup, leaveMeetup, listJoinRequests, approveJoinRequest, declineJoinRequest,
   suggestedFriends, createMeetupReview, listMeetupReviews,
-} = Object.fromEntries(Object.entries(require('../controllers/meetups.controller')).map(([k, v]) => [k, asyncHandler(v)]));
+} = require('../controllers/meetups.controller');
 
 const router = express.Router();
 

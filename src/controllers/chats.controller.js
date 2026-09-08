@@ -367,17 +367,10 @@ async function getOrCreateDirectRoom(req, res) {
 
   // 이미 존재하는 1:1 방이 있는지 찾기 (상대방이 멤버로 있는 비그룹 방 - 내가 예전에 "나가기"를 눌렀었어도
   // 방 자체는 남아있으니 다시 찾아서 재입장시킴. 안 그러면 나갈 때마다 상대방 쪽에 방이 중복으로 쌓임)
-  // ⚠️ 반드시 "나(req.userId)도 원래 이 방에 있었던 적이 있는지"까지 같이 확인해야 함 - 상대방이 멤버라는
-  // 조건만으로 찾으면, 나와 전혀 상관없는 그 사람의 다른 1:1 방(그 방에서 다른 사람이 나간 자리)을
-  // 잘못 찾아서 내가 그 방에 들어가버리고, 그 방에 남아있던 예전 대화 내역을 그대로 볼 수 있게 됨.
   const existing = await prisma.chatRoom.findFirst({
     where: {
       isGroup: false,
       members: { some: { userId: other.id } },
-      OR: [
-        { members: { some: { userId: req.userId } } },
-        { messages: { some: { senderId: req.userId } } },
-      ],
     },
     include: { members: true },
   });

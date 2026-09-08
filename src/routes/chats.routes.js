@@ -1,6 +1,5 @@
 const express = require('express');
 const { requireAuth } = require('../middleware/auth.middleware');
-const asyncHandler = require('../lib/asyncHandler');
 const {
   listChatRooms,
   getOrCreateDirectRoom,
@@ -28,7 +27,7 @@ const {
   createPin,
   updatePin,
   deletePin,
-} = Object.fromEntries(Object.entries(require('../controllers/chats.controller')).map(([k, v]) => [k, asyncHandler(v)]));
+} = require('../controllers/chats.controller');
 
 const router = express.Router();
 
