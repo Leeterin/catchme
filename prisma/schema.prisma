@@ -420,6 +420,7 @@ model FeedPostComment {
   authorId  String
   author    User     @relation(fields: [authorId], references: [id], onDelete: Cascade)
   text      String
+  rating    Int? // 댓글에도 선택적으로 1~5점 별점을 달 수 있음 (원글 작성자가 아니어도 자기 의견을 별점으로 남길 수 있게)
   createdAt DateTime @default(now())
 
   @@map("feed_post_comments")

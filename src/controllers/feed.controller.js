@@ -25,6 +25,11 @@ function validatePhotos(photos) {
 // 그 경우엔 연결된 place에서 값을 가져와 보여줌 (과거 데이터도 안 깨지게).
 function serializePost(post, myUserId) {
   const likes = post.likes || [];
+  // 게시물 자신의 별점(작성자가 처음 남긴 것)과, 리뷰(댓글)에 달린 별점들을 다 합쳐서 평균을 냄.
+  // 네이버지도처럼 "4.3 ★★★★☆ (12)" 형태로 보여주기 위한 값.
+  const commentRatings = (post.comments || []).map((c) => c.rating).filter((r) => typeof r === 'number');
+  const allRatings = typeof post.rating === 'number' ? [post.rating, ...commentRatings] : commentRatings;
+  const avgRating = allRatings.length > 0 ? allRatings.reduce((sum, r) => sum + r, 0) / allRatings.length : null;
   return {
     id: post.id,
     author: post.author ? { id: post.author.id, username: post.author.username, name: post.author.name } : null,
@@ -35,9 +40,11 @@ function serializePost(post, myUserId) {
     lon: post.lon ?? (post.place ? post.place.lon : null),
     note: post.note,
     rating: post.rating,
+    avgRating: avgRating !== null ? Math.round(avgRating * 10) / 10 : null,
+    ratingCount: allRatings.length,
     photos: post.photos || [],
     likeCount: post._count ? post._count.likes : likes.length,
-    commentCount: post._count ? post._count.comments : undefined,
+    commentCount: post._count ? post._count.comments : (post.comments ? post.comments.length : undefined),
     likedByMe: myUserId ? likes.some((l) => l.userId === myUserId) : false,
     createdAt: post.createdAt,
   };
@@ -48,6 +55,7 @@ function serializeComment(comment) {
     id: comment.id,
     postId: comment.postId,
     text: comment.text,
+    rating: comment.rating,
     author: comment.author ? { id: comment.author.id, username: comment.author.username, name: comment.author.name } : null,
     createdAt: comment.createdAt,
   };
@@ -76,6 +84,7 @@ async function listFeedPosts(req, res) {
       author: { select: { id: true, username: true, name: true } },
       place: true,
       likes: { select: { userId: true } },
+      comments: { select: { rating: true } },
       _count: { select: { likes: true, comments: true } },
     },
     orderBy: { createdAt: 'desc' },
@@ -93,7 +102,7 @@ async function listFeedPosts(req, res) {
 
   result.sort((a, b) => {
     if (sort === 'popular') return b.likeCount - a.likeCount;
-    if (sort === 'rating') return (b.rating || 0) - (a.rating || 0);
+    if (sort === 'rating') return (b.avgRating || 0) - (a.avgRating || 0);
     if (hasLocation && sort !== 'recent') return a.distanceKm - b.distanceKm;
     return new Date(b.createdAt) - new Date(a.createdAt);
   });
@@ -228,15 +237,20 @@ async function listComments(req, res) {
 // POST /api/feed/:id/comments   body: { text }
 async function createComment(req, res) {
   const { id } = req.params;
-  const { text } = req.body;
+  const { text, rating } = req.body;
   if (!text || !text.trim()) {
     return res.status(400).json({ message: '댓글 내용을 입력해주세요.' });
+  }
+  if (rating !== undefined && rating !== null) {
+    if (typeof rating !== 'number' || !Number.isInteger(rating) || rating < 1 || rating > 5) {
+      return res.status(400).json({ message: '별점은 1~5 사이의 정수여야 해요.' });
+    }
   }
   const post = await prisma.feedPost.findUnique({ where: { id } });
   if (!post) return res.status(404).json({ message: '게시물을 찾을 수 없어요.' });
 
   const comment = await prisma.feedPostComment.create({
-    data: { postId: id, authorId: req.userId, text: text.trim() },
+    data: { postId: id, authorId: req.userId, text: text.trim(), rating: typeof rating === 'number' ? rating : null },
     include: { author: { select: { id: true, username: true, name: true } } },
   });
   return res.status(201).json({ comment: serializeComment(comment) });
