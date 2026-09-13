@@ -80,6 +80,7 @@ function serializeMessage(message) {
         location: message.locationAddress,
         locationLat: message.locationLat,
         locationLon: message.locationLon,
+        changed: message.locationNote === 'changed',
       },
     };
   }
@@ -1173,6 +1174,8 @@ async function updatePin(req, res) {
 
   let noticeMessage = null;
   if (location !== undefined && location) {
+    // 이전에도 장소가 있었는데 이번에 다른 곳으로 바뀐 거면 "변경" 알림으로 표시함 (처음 정하는 거면 그냥 신규 알림)
+    const isChange = !!(pin.location && pin.location !== location);
     const created = await prisma.message.create({
       data: {
         chatRoomId: pin.chatRoomId,
@@ -1182,6 +1185,7 @@ async function updatePin(req, res) {
         locationAddress: location,
         locationLat: typeof locationLat === 'number' ? locationLat : null,
         locationLon: typeof locationLon === 'number' ? locationLon : null,
+        locationNote: isChange ? 'changed' : null, // LOCATION_NOTICE에서는 이 필드를 변경 여부 마커로 재사용함
       },
     });
     noticeMessage = serializeMessage(created);
