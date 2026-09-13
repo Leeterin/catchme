@@ -2,12 +2,18 @@ const prisma = require('../lib/prisma');
 const { distanceKm } = require('../lib/geo');
 
 const MAX_IMAGE_CHARS = 700000; // base64 문자열 기준 대략 500KB (프로필 사진과 동일한 기준)
-const MAX_PHOTOS = 3;
+const MAX_PHOTOS = 5;
+const MIN_PHOTOS = 1;
 
 // 사진 배열이 올바른지 검사 (개수 제한, base64 이미지 형식, 용량 제한)
-function validatePhotos(photos) {
-  if (photos === undefined || photos === null) return { valid: [], error: null };
+// requireAtLeastOne이 true면 사진이 최소 1장은 있어야 함 (게시물은 항상 사진이 1~5장 있어야 하므로)
+function validatePhotos(photos, { requireAtLeastOne } = {}) {
+  if (photos === undefined || photos === null) {
+    if (requireAtLeastOne) return { valid: null, error: `사진을 최소 ${MIN_PHOTOS}장 올려주세요.` };
+    return { valid: [], error: null };
+  }
   if (!Array.isArray(photos)) return { valid: null, error: '사진 형식이 올바르지 않아요.' };
+  if (requireAtLeastOne && photos.length < MIN_PHOTOS) return { valid: null, error: `사진을 최소 ${MIN_PHOTOS}장 올려주세요.` };
   if (photos.length > MAX_PHOTOS) return { valid: null, error: `사진은 최대 ${MAX_PHOTOS}장까지 첨부할 수 있어요.` };
   for (const p of photos) {
     if (typeof p !== 'string' || !p.startsWith('data:image/')) {
@@ -125,7 +131,7 @@ async function createFeedPost(req, res) {
       return res.status(400).json({ message: '별점은 1~5 사이의 정수여야 해요.' });
     }
   }
-  const { valid: validPhotos, error: photoError } = validatePhotos(photos);
+  const { valid: validPhotos, error: photoError } = validatePhotos(photos, { requireAtLeastOne: true });
   if (photoError) return res.status(400).json({ message: photoError });
 
   const post = await prisma.feedPost.create({
@@ -170,7 +176,7 @@ async function updateFeedPost(req, res) {
     data.rating = rating;
   }
   if (photos !== undefined) {
-    const { valid: validPhotos, error: photoError } = validatePhotos(photos);
+    const { valid: validPhotos, error: photoError } = validatePhotos(photos, { requireAtLeastOne: true });
     if (photoError) return res.status(400).json({ message: photoError });
     data.photos = validPhotos || [];
   }
