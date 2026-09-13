@@ -1174,9 +1174,11 @@ async function updatePin(req, res) {
 
   let noticeMessage = null;
   if (location !== undefined && location) {
-    // 이 핀에 대해 예전에 만들어졌던 장소 알림 메시지는 지우고, 항상 최신 장소 알림 하나만 채팅에 남김
+    // 이 핀 id로만 좁혀서 지우면, 어떤 이유로든 핀 id가 어긋난 경우(예: 예전 데이터, 다른 경로로 생성된 핀 등)
+    // 예전 알림이 안 지워지고 계속 쌓이는 문제가 생길 수 있어서, 이 채팅방에 있는 장소 알림은 전부 지우고
+    // 이 채팅방엔 항상 최신 장소 알림 하나만 남도록 함
     await prisma.message.deleteMany({
-      where: { chatRoomId: pin.chatRoomId, type: 'LOCATION_NOTICE', locationNote: pin.id },
+      where: { chatRoomId: pin.chatRoomId, type: 'LOCATION_NOTICE' },
     });
     const created = await prisma.message.create({
       data: {
