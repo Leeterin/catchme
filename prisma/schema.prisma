@@ -159,6 +159,7 @@ enum ReservationStatus {
   DECLINED
   WITHDRAWN // 보낸 사람이 대기중인 요청을 스스로 취소
   CANCELLED // 확정됐던 예약을 나중에 취소
+  SUPERSEDED // LOCATION_NOTICE 전용: 장소가 다시 바뀌어서, 이 알림은 이제 예전 알림이 됐다는 표시 (작은 알림으로만 표시됨)
 }
 
 model ChatRoom {

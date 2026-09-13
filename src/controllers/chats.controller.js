@@ -81,6 +81,7 @@ function serializeMessage(message) {
         locationLat: message.locationLat,
         locationLon: message.locationLon,
         pinId: message.locationNote || null, // 이 알림이 어느 핀(PinnedItem)에 속하는지 - locationNote 필드를 링크용으로 재사용함
+        superseded: message.locationStatus === 'SUPERSEDED', // 장소가 그 뒤에 또 바뀌어서, 이제 예전 알림이 된 경우
       },
     };
   }
@@ -1174,11 +1175,11 @@ async function updatePin(req, res) {
 
   let noticeMessage = null;
   if (location !== undefined && location) {
-    // 이 핀 id로만 좁혀서 지우면, 어떤 이유로든 핀 id가 어긋난 경우(예: 예전 데이터, 다른 경로로 생성된 핀 등)
-    // 예전 알림이 안 지워지고 계속 쌓이는 문제가 생길 수 있어서, 이 채팅방에 있는 장소 알림은 전부 지우고
-    // 이 채팅방엔 항상 최신 장소 알림 하나만 남도록 함
-    await prisma.message.deleteMany({
-      where: { chatRoomId: pin.chatRoomId, type: 'LOCATION_NOTICE' },
+    // 장소가 새로 바뀌면, 이 채팅방에 남아있던 예전 장소 알림들은 지우지 않고 "예전 알림"으로 표시만 바꿔서
+    // (작은 "약속 장소가 변경됐어요" 알림으로) 계속 남겨두고, 새 알림 하나만 지금 확정된 장소로 크게 보여줌
+    await prisma.message.updateMany({
+      where: { chatRoomId: pin.chatRoomId, type: 'LOCATION_NOTICE', locationStatus: { not: 'SUPERSEDED' } },
+      data: { locationStatus: 'SUPERSEDED' },
     });
     const created = await prisma.message.create({
       data: {
@@ -1189,7 +1190,7 @@ async function updatePin(req, res) {
         locationAddress: location,
         locationLat: typeof locationLat === 'number' ? locationLat : null,
         locationLon: typeof locationLon === 'number' ? locationLon : null,
-        locationNote: pin.id, // LOCATION_NOTICE에서는 이 필드를 "어느 핀 소속인지" 링크용으로 재사용함 (다음에 장소가 또 바뀌면 이 값으로 찾아서 지움)
+        locationNote: pin.id, // LOCATION_NOTICE에서는 이 필드를 "어느 핀 소속인지" 링크용으로 재사용함
       },
     });
     noticeMessage = serializeMessage(created);
