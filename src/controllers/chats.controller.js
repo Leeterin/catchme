@@ -72,6 +72,18 @@ function serializeMessage(message) {
     };
   }
 
+  if (message.type === 'LOCATION_NOTICE') {
+    return {
+      ...base,
+      locationNotice: {
+        place: message.locationPlace,
+        location: message.locationAddress,
+        locationLat: message.locationLat,
+        locationLon: message.locationLon,
+      },
+    };
+  }
+
   return {
     ...base,
     reservation: {
@@ -1119,13 +1131,13 @@ async function listPins(req, res) {
   return res.json({ pins });
 }
 
-// POST /api/chats/:roomId/pins   body: { dateLabel?, timeLabel?, note?, location?, sourceMessageId? }
+// POST /api/chats/:roomId/pins   body: { dateLabel?, timeLabel?, note?, location?, locationLat?, locationLon?, sourceMessageId? }
 async function createPin(req, res) {
   const { roomId } = req.params;
   if (!(await assertMembership(roomId, req.userId))) {
     return res.status(403).json({ message: '이 채팅방에 접근할 권한이 없어요.' });
   }
-  const { dateLabel, timeLabel, note, location, sourceMessageId } = req.body;
+  const { dateLabel, timeLabel, note, location, locationLat, locationLon, sourceMessageId } = req.body;
   const pin = await prisma.pinnedItem.create({
     data: {
       chatRoomId: roomId,
@@ -1133,25 +1145,50 @@ async function createPin(req, res) {
       timeLabel: timeLabel || null,
       note: note || null,
       location: location || null,
+      locationLat: typeof locationLat === 'number' ? locationLat : null,
+      locationLon: typeof locationLon === 'number' ? locationLon : null,
       sourceMessageId: sourceMessageId || null,
     },
   });
   return res.status(201).json({ pin });
 }
 
-// PATCH /api/chats/pins/:pinId   body: { location? }  - 핀에 장소만 나중에 추가/수정할 때 사용
+// PATCH /api/chats/pins/:pinId   body: { location?, locationLat?, locationLon? }  - 핀에 장소만 나중에 추가/수정할 때 사용
+// 장소가 새로 등록/변경되면 채팅방에 LOCATION_NOTICE 메시지를 만들어서 상대방(들)에게 실시간으로 알려줌
 async function updatePin(req, res) {
   const { pinId } = req.params;
   const pin = await prisma.pinnedItem.findUnique({ where: { id: pinId } });
   if (!pin || !(await assertMembership(pin.chatRoomId, req.userId))) {
     return res.status(404).json({ message: '핀을 찾을 수 없어요.' });
   }
-  const { location } = req.body;
+  const { location, locationLat, locationLon } = req.body;
   const updated = await prisma.pinnedItem.update({
     where: { id: pinId },
-    data: { location: location !== undefined ? location : undefined },
+    data: {
+      location: location !== undefined ? location : undefined,
+      locationLat: locationLat !== undefined ? (typeof locationLat === 'number' ? locationLat : null) : undefined,
+      locationLon: locationLon !== undefined ? (typeof locationLon === 'number' ? locationLon : null) : undefined,
+    },
   });
-  return res.json({ pin: updated });
+
+  let noticeMessage = null;
+  if (location !== undefined && location) {
+    const created = await prisma.message.create({
+      data: {
+        chatRoomId: pin.chatRoomId,
+        senderId: req.userId,
+        type: 'LOCATION_NOTICE',
+        locationPlace: location,
+        locationAddress: location,
+        locationLat: typeof locationLat === 'number' ? locationLat : null,
+        locationLon: typeof locationLon === 'number' ? locationLon : null,
+      },
+    });
+    noticeMessage = serializeMessage(created);
+    await notifyRoom(pin.chatRoomId, req.userId, 'newMessage', { roomId: pin.chatRoomId, message: noticeMessage });
+  }
+
+  return res.json({ pin: updated, message: noticeMessage });
 }
 
 // DELETE /api/chats/pins/:pinId

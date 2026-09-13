@@ -143,6 +143,7 @@ enum MessageType {
   RESERVATION
   TIME_PROPOSAL
   LOCATION_SUGGEST
+  LOCATION_NOTICE // 채팅방에 고정된 장소(PinnedItem)가 등록/변경됐을 때 상대방에게 알려주는 일방향 알림 메시지
   IMAGE
 }
 
@@ -304,6 +305,8 @@ model PinnedItem {
   timeLabel       String?
   note            String?
   location        String?
+  locationLat     Float?
+  locationLon     Float?
   sourceMessageId String?
   createdAt       DateTime @default(now())
 
