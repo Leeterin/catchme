@@ -80,7 +80,7 @@ function serializeMessage(message) {
         location: message.locationAddress,
         locationLat: message.locationLat,
         locationLon: message.locationLon,
-        changed: message.locationNote === 'changed',
+        pinId: message.locationNote || null, // 이 알림이 어느 핀(PinnedItem)에 속하는지 - locationNote 필드를 링크용으로 재사용함
       },
     };
   }
@@ -1174,8 +1174,10 @@ async function updatePin(req, res) {
 
   let noticeMessage = null;
   if (location !== undefined && location) {
-    // 이전에도 장소가 있었는데 이번에 다른 곳으로 바뀐 거면 "변경" 알림으로 표시함 (처음 정하는 거면 그냥 신규 알림)
-    const isChange = !!(pin.location && pin.location !== location);
+    // 이 핀에 대해 예전에 만들어졌던 장소 알림 메시지는 지우고, 항상 최신 장소 알림 하나만 채팅에 남김
+    await prisma.message.deleteMany({
+      where: { chatRoomId: pin.chatRoomId, type: 'LOCATION_NOTICE', locationNote: pin.id },
+    });
     const created = await prisma.message.create({
       data: {
         chatRoomId: pin.chatRoomId,
@@ -1185,7 +1187,7 @@ async function updatePin(req, res) {
         locationAddress: location,
         locationLat: typeof locationLat === 'number' ? locationLat : null,
         locationLon: typeof locationLon === 'number' ? locationLon : null,
-        locationNote: isChange ? 'changed' : null, // LOCATION_NOTICE에서는 이 필드를 변경 여부 마커로 재사용함
+        locationNote: pin.id, // LOCATION_NOTICE에서는 이 필드를 "어느 핀 소속인지" 링크용으로 재사용함 (다음에 장소가 또 바뀌면 이 값으로 찾아서 지움)
       },
     });
     noticeMessage = serializeMessage(created);
