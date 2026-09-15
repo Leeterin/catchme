@@ -26,6 +26,13 @@ function validatePhotos(photos, { requireAtLeastOne } = {}) {
   return { valid: photos, error: null };
 }
 
+// 작성자 정보를 응답에 넣을 때 공용으로 쓰는 모양 - 프로필 사진 원본(base64)은 안 보내고
+// 있는지 여부만 보내서, 프론트에서 친구/채팅 목록과 똑같이 /api/users/:id/avatar 로 따로 받아 쓰게 함
+function serializeAuthor(author) {
+  if (!author) return null;
+  return { id: author.id, username: author.username, name: author.name, hasAvatar: !!author.profileImageUrl };
+}
+
 // 게시물 하나를 통째로 반환 (제목/위치/카테고리 등 전부 게시물 자체에 있음 - 더 이상 장소로 안 묶음).
 // 예전 방식(장소 분리 시절)으로 만들어진 게시물은 title/category/location이 비어있을 수 있어서,
 // 그 경우엔 연결된 place에서 값을 가져와 보여줌 (과거 데이터도 안 깨지게).
@@ -38,7 +45,7 @@ function serializePost(post, myUserId) {
   const avgRating = allRatings.length > 0 ? allRatings.reduce((sum, r) => sum + r, 0) / allRatings.length : null;
   return {
     id: post.id,
-    author: post.author ? { id: post.author.id, username: post.author.username, name: post.author.name } : null,
+    author: serializeAuthor(post.author),
     category: post.category || (post.place ? post.place.category : null),
     title: post.title || (post.place ? post.place.name : ''),
     location: post.location || (post.place ? post.place.location : null),
@@ -62,7 +69,7 @@ function serializeComment(comment) {
     postId: comment.postId,
     text: comment.text,
     rating: comment.rating,
-    author: comment.author ? { id: comment.author.id, username: comment.author.username, name: comment.author.name } : null,
+    author: serializeAuthor(comment.author),
     createdAt: comment.createdAt,
   };
 }
@@ -87,7 +94,7 @@ async function listFeedPosts(req, res) {
   const posts = await prisma.feedPost.findMany({
     where,
     include: {
-      author: { select: { id: true, username: true, name: true } },
+      author: { select: { id: true, username: true, name: true, profileImageUrl: true } },
       place: true,
       likes: { select: { userId: true } },
       comments: { select: { rating: true } },
@@ -146,7 +153,7 @@ async function createFeedPost(req, res) {
       rating: typeof rating === 'number' ? rating : null,
       photos: validPhotos || [],
     },
-    include: { author: { select: { id: true, username: true, name: true } }, likes: true },
+    include: { author: { select: { id: true, username: true, name: true, profileImageUrl: true } }, likes: true },
   });
 
   return res.status(201).json({ post: serializePost(post, req.userId) });
@@ -188,7 +195,7 @@ async function updateFeedPost(req, res) {
   const updated = await prisma.feedPost.update({
     where: { id },
     data,
-    include: { author: { select: { id: true, username: true, name: true } }, likes: true },
+    include: { author: { select: { id: true, username: true, name: true, profileImageUrl: true } }, likes: true },
   });
   return res.json({ post: serializePost(updated, req.userId) });
 }
@@ -234,7 +241,7 @@ async function listComments(req, res) {
   const { id } = req.params;
   const comments = await prisma.feedPostComment.findMany({
     where: { postId: id },
-    include: { author: { select: { id: true, username: true, name: true } } },
+    include: { author: { select: { id: true, username: true, name: true, profileImageUrl: true } } },
     orderBy: { createdAt: 'asc' },
   });
   return res.json({ comments: comments.map(serializeComment) });
@@ -257,7 +264,7 @@ async function createComment(req, res) {
 
   const comment = await prisma.feedPostComment.create({
     data: { postId: id, authorId: req.userId, text: text.trim(), rating: typeof rating === 'number' ? rating : null },
-    include: { author: { select: { id: true, username: true, name: true } } },
+    include: { author: { select: { id: true, username: true, name: true, profileImageUrl: true } } },
   });
   return res.status(201).json({ comment: serializeComment(comment) });
 }
