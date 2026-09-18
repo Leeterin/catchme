@@ -52,7 +52,10 @@ io.on('connection', (socket) => {
 setIo(io);
 
 app.use(cors());
-app.use(express.json());
+// 기본 body 크기 제한(100kb)은 리뷰/채팅 사진(base64, 장당 최대 약 500~700KB, 리뷰는 최대 5장)을 못 담아서
+// 사진 있는 요청이 "PayloadTooLargeError"로 튕기고 프론트에는 "서버에서 예상치 못한 오류가 발생했어요"로만 보였음.
+// 특히 폰 카메라로 찍은 사진은 디테일이 많아 같은 해상도로 압축해도 컴퓨터 사진보다 용량이 커서 이 한도를 더 잘 넘었음.
+app.use(express.json({ limit: '10mb' }));
 
 // 전체 API에 대한 넓은 안전망 - IP 하나당 1분에 300번 넘게 요청하면 잠깐 막음 (봇/무한루프 방지용, 평소 정상 사용엔 영향 없음)
 const rateLimit = require('express-rate-limit');
