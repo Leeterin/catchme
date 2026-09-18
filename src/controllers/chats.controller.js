@@ -379,12 +379,18 @@ async function getOrCreateDirectRoom(req, res) {
     return res.status(403).json({ message: '차단된 사용자와는 채팅방을 열 수 없어요.' });
   }
 
-  // 이미 존재하는 1:1 방이 있는지 찾기 (상대방이 멤버로 있는 비그룹 방 - 내가 예전에 "나가기"를 눌렀었어도
+  // 이미 존재하는 1:1 방이 있는지 찾기 (나랑 상대방이 "둘 다" 멤버로 있는 비그룹 방 - 내가 예전에 "나가기"를 눌렀었어도
   // 방 자체는 남아있으니 다시 찾아서 재입장시킴. 안 그러면 나갈 때마다 상대방 쪽에 방이 중복으로 쌓임)
+  // 주의: 상대방이 멤버인지만 보고 찾으면, 상대방이 전혀 다른 사람과 만든 1:1 방을 잘못 찾아와서
+  // 그 방에 나를 3번째 멤버로 끼워넣는 심각한 버그가 생김(상대방이 원래 대화하던 사람의 이름/사진이
+  // 내 화면에 뒤섞여 보이는 원인). 반드시 "나"와 "상대방"이 함께 속한 방인지 둘 다 확인해야 함.
   const existing = await prisma.chatRoom.findFirst({
     where: {
       isGroup: false,
-      members: { some: { userId: other.id } },
+      AND: [
+        { members: { some: { userId: req.userId } } },
+        { members: { some: { userId: other.id } } },
+      ],
     },
     include: { members: true },
   });
