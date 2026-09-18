@@ -737,7 +737,9 @@ async function cancelReservationMessage(req, res) {
 
   const updated = await prisma.$transaction(async (tx) => {
     const result = await tx.message.update({ where: { id: messageId }, data: { reservationStatus: 'CANCELLED' } });
-    await tx.pinnedItem.deleteMany({ where: { sourceMessageId: messageId } });
+    // 이 예약 자체의 핀뿐 아니라, 같은 방에 별도로 확정해둔 장소 핀("여기 어때요?" 제안 등으로 따로 생긴 핀)도
+    // 이 약속의 장소였을 테니 같이 지움. 안 그러면 약속은 지워졌는데 장소 카드만 채팅방에 유령처럼 남음
+    await tx.pinnedItem.deleteMany({ where: { chatRoomId: message.chatRoomId } });
 
     // 확정되면서 양쪽 캘린더에 생겼던 "약속" 일정을 실제로 지움 (안 지우면 취소해도 유령처럼 계속 남음)
     const linkedEvents = await tx.event.findMany({ where: { sourceMessageId: messageId, isPendingHold: false } });
@@ -1044,7 +1046,8 @@ async function cancelTimeProposal(req, res) {
       data: { proposalStatus: 'CANCELLED' },
       include: PROPOSAL_INCLUDE,
     });
-    await tx.pinnedItem.deleteMany({ where: { sourceMessageId: messageId } }); // 확정돼서 핀이 있었으면 같이 제거
+    // 이 제안 자체의 핀뿐 아니라, 같은 방에 별도로 확정해둔 장소 핀도 이 약속의 장소였을 테니 같이 지움
+    await tx.pinnedItem.deleteMany({ where: { chatRoomId: message.chatRoomId } });
 
     // 이미 확정돼서 다들 캘린더에 "약속"이 생겨있던 상태였다면, 그 일정들도 실제로 지우고 예약가능을 복원함
     if (wasConfirmed) {
