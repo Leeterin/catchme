@@ -274,7 +274,10 @@ async function listChatRooms(req, res) {
     include: {
       chatRoom: {
         include: {
-          members: { include: { user: { select: MEMBER_USER_SELECT } } },
+          // joinedAt 기준 오름차순 - 원래 이 방을 만든 두 사람이 항상 먼저 오고, 혹시라도 방이
+          // 잘못 섞여서 멤버가 늘어난 경우에도(버그로 생긴 예전 데이터 등) "상대방"이 매번 다르게
+          // 보이지 않고 항상 가장 먼저 들어온 사람으로 일관되게 표시되도록 함
+          members: { orderBy: { joinedAt: 'asc' }, include: { user: { select: MEMBER_USER_SELECT } } },
           messages: { orderBy: { createdAt: 'desc' }, take: 1 },
         },
       },
@@ -285,6 +288,7 @@ async function listChatRooms(req, res) {
   const rooms = await Promise.all(
     memberships.map(async (membership) => {
       const room = membership.chatRoom;
+      // members는 위에서 joinedAt asc로 정렬해왔으니, 가장 먼저 들어온(=원래) 상대방이 항상 고정적으로 뽑힘
       const otherMember = room.isGroup ? null : room.members.find((mem) => mem.userId !== req.userId);
       // 사진 원본(base64) 대신 있는지 여부만 - 실제 이미지는 캐싱되는 /api/users/:id/avatar 로 따로 받음
       const other = otherMember ? { ...otherMember.user, hasAvatar: !!otherMember.user.profileImageUrl, profileImageUrl: undefined } : null;
