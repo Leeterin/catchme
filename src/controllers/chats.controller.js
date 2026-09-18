@@ -811,6 +811,8 @@ async function sendLocationSuggest(req, res) {
           chatRoomId: roomId,
           note: message.locationNote,
           location: message.locationPlace,
+          locationLat: message.locationLat,
+          locationLon: message.locationLon,
           sourceMessageId: message.id,
         },
       });
@@ -864,6 +866,8 @@ async function respondToLocationSuggest(req, res, status) {
           chatRoomId: message.chatRoomId,
           note: message.locationNote,
           location: message.locationPlace,
+          locationLat: message.locationLat,
+          locationLon: message.locationLon,
           sourceMessageId: message.id,
         },
       });
