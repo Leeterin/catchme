@@ -789,9 +789,8 @@ async function sendLocationSuggest(req, res) {
 
   const trimmedPlace = place.trim();
 
-  // 아직 답변을 기다리고 있는(PENDING) 같은 장소 제안이 이미 있으면 중복으로 또 못 보내게 막음.
-  // 안 그러면 같은 곳을 여러 번 눌러 제안해서 "여기 어때요?" 카드가 채팅에 중복으로 쌓임
-  const duplicatePending = await prisma.message.findFirst({
+  // 아직 답변을 기다리고 있는(PENDING) 같은 장소 제안이 있는지 확인
+  const pendingForPlace = await prisma.message.findFirst({
     where: {
       chatRoomId: roomId,
       type: 'LOCATION_SUGGEST',
@@ -799,11 +798,14 @@ async function sendLocationSuggest(req, res) {
       locationPlace: { equals: trimmedPlace, mode: 'insensitive' },
     },
   });
-  if (duplicatePending) {
+  // "제안하기"(대답을 기다리는 상태로 새로 보냄)인데 같은 장소가 이미 대기 중이면 중복으로 또 못 보내게 막음.
+  // 안 그러면 같은 곳을 여러 번 눌러 제안해서 "여기 어때요?" 카드가 채팅에 중복으로 쌓임.
+  // "장소 픽스"(immediate)는 대기 중이던 제안을 그 자리에서 바로 확정시키는 동작이라 여기서는 막지 않음.
+  if (pendingForPlace && !immediate) {
     return res.status(409).json({ message: `"${trimmedPlace}"은(는) 이미 제안되어 답변을 기다리고 있어요.` });
   }
 
-  // 이미 이 장소로 확정돼 있으면(날짜 없이 장소만 고정해둔 핀) 또 제안할 필요가 없음
+  // 이미 이 장소로 확정돼 있으면(날짜 없이 장소만 고정해둔 핀) 또 제안/픽스할 필요가 없음
   const alreadyConfirmedPin = await prisma.pinnedItem.findFirst({
     where: {
       chatRoomId: roomId,
@@ -813,6 +815,32 @@ async function sendLocationSuggest(req, res) {
   });
   if (alreadyConfirmedPin) {
     return res.status(409).json({ message: `"${trimmedPlace}"은(는) 이미 확정된 장소예요.` });
+  }
+
+  // "장소 픽스"인데 같은 장소로 이미 대기 중인 제안이 있으면, 새 메시지를 또 만들지 않고
+  // 그 제안 메시지를 그대로 확정 처리함 (채팅에 "제안" 카드와 "픽스" 카드가 중복으로 남지 않게)
+  if (immediate && pendingForPlace) {
+    const confirmedMessage = await prisma.$transaction(async (tx) => {
+      const updated = await tx.message.update({
+        where: { id: pendingForPlace.id },
+        data: { locationStatus: 'CONFIRMED' },
+      });
+      await tx.pinnedItem.deleteMany({ where: { chatRoomId: roomId, dateLabel: null } });
+      await tx.pinnedItem.create({
+        data: {
+          chatRoomId: roomId,
+          note: updated.locationNote,
+          location: updated.locationPlace,
+          locationLat: updated.locationLat,
+          locationLon: updated.locationLon,
+          sourceMessageId: updated.id,
+        },
+      });
+      await supersedeOldLocationNotices(tx, roomId);
+      return updated;
+    });
+    await notifyRoom(roomId, req.userId, 'newMessage', { roomId, message: serializeMessage(confirmedMessage) });
+    return res.status(201).json({ message: serializeMessage(confirmedMessage) });
   }
 
   const message = await prisma.message.create({
