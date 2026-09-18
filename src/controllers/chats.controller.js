@@ -273,6 +273,22 @@ async function assertCanMessage(chatRoomId, userId) {
   return { ok: true };
 }
 
+// 이 방에 남아있던 예전 장소 알림(LOCATION_NOTICE)들을 전부 "예전 알림"(SUPERSEDED)으로 바꿔서
+// 채팅에서는 작은 "약속 장소가 변경됐어요" 알림으로만 보이게 함.
+// locationStatus가 비어있는(null) 레거시 알림도 OR로 같이 잡아줘야 함 - Prisma의 `not: 'SUPERSEDED'` 필터는
+// SQL 특성상 null 값인 행에는 안 걸려서, OR 없이 이것만 쓰면 그 알림들은 영원히 SUPERSEDED 처리가 안 되고
+// 장소가 몇 번을 바뀌어도 예전 알림 카드들이 전부 큰 채로 계속 쌓여 보이는 버그가 생김
+async function supersedeOldLocationNotices(db, chatRoomId) {
+  await db.message.updateMany({
+    where: {
+      chatRoomId,
+      type: 'LOCATION_NOTICE',
+      OR: [{ locationStatus: null }, { locationStatus: { not: 'SUPERSEDED' } }],
+    },
+    data: { locationStatus: 'SUPERSEDED' },
+  });
+}
+
 // GET /api/chats — 내가 속한 채팅방 목록, 최근 활동 순 정렬
 async function listChatRooms(req, res) {
   const memberships = await prisma.chatRoomMember.findMany({
@@ -786,13 +802,20 @@ async function sendLocationSuggest(req, res) {
   });
 
   if (immediate) {
-    await prisma.pinnedItem.create({
-      data: {
-        chatRoomId: roomId,
-        note: message.locationNote,
-        location: message.locationPlace,
-        sourceMessageId: message.id,
-      },
+    await prisma.$transaction(async (tx) => {
+      // 날짜 없이 "장소만" 고정해두던 예전 핀이 있으면 지우고 이번 걸로 새로 고정함 (안 그러면 이 방에
+      // 장소 핀이 여러 개 쌓여서, 상단 고정 영역에 예전 장소들이 유령처럼 계속 같이 떠 있게 됨)
+      await tx.pinnedItem.deleteMany({ where: { chatRoomId: roomId, dateLabel: null } });
+      await tx.pinnedItem.create({
+        data: {
+          chatRoomId: roomId,
+          note: message.locationNote,
+          location: message.locationPlace,
+          sourceMessageId: message.id,
+        },
+      });
+      // 예전에 "장소 정하기"로 남겨뒀던 큰 장소 알림 카드가 있었다면, 이제 이 장소로 바뀌었으니 작은 알림으로 접어둠
+      await supersedeOldLocationNotices(tx, roomId);
     });
   }
 
@@ -832,13 +855,20 @@ async function respondToLocationSuggest(req, res, status) {
   const updated = await prisma.message.findUnique({ where: { id: messageId } });
 
   if (status === 'CONFIRMED') {
-    await prisma.pinnedItem.create({
-      data: {
-        chatRoomId: message.chatRoomId,
-        note: message.locationNote,
-        location: message.locationPlace,
-        sourceMessageId: message.id,
-      },
+    await prisma.$transaction(async (tx) => {
+      // 날짜 없이 "장소만" 고정해두던 예전 핀이 있으면 지우고 이번에 수락된 장소로 새로 고정함 (안 그러면
+      // 이 방에 장소 핀이 여러 개 쌓여서, 상단 고정 영역에 예전 장소들이 유령처럼 계속 같이 떠 있게 됨)
+      await tx.pinnedItem.deleteMany({ where: { chatRoomId: message.chatRoomId, dateLabel: null } });
+      await tx.pinnedItem.create({
+        data: {
+          chatRoomId: message.chatRoomId,
+          note: message.locationNote,
+          location: message.locationPlace,
+          sourceMessageId: message.id,
+        },
+      });
+      // 예전에 "장소 정하기"로 남겨뒀던 큰 장소 알림 카드가 있었다면, 이제 이 장소로 바뀌었으니 작은 알림으로 접어둠
+      await supersedeOldLocationNotices(tx, message.chatRoomId);
     });
   }
 
@@ -1203,10 +1233,7 @@ async function updatePin(req, res) {
   if (location !== undefined && location) {
     // 장소가 새로 바뀌면, 이 채팅방에 남아있던 예전 장소 알림들은 지우지 않고 "예전 알림"으로 표시만 바꿔서
     // (작은 "약속 장소가 변경됐어요" 알림으로) 계속 남겨두고, 새 알림 하나만 지금 확정된 장소로 크게 보여줌
-    await prisma.message.updateMany({
-      where: { chatRoomId: pin.chatRoomId, type: 'LOCATION_NOTICE', locationStatus: { not: 'SUPERSEDED' } },
-      data: { locationStatus: 'SUPERSEDED' },
-    });
+    await supersedeOldLocationNotices(prisma, pin.chatRoomId);
     const created = await prisma.message.create({
       data: {
         chatRoomId: pin.chatRoomId,
@@ -1217,6 +1244,7 @@ async function updatePin(req, res) {
         locationLat: typeof locationLat === 'number' ? locationLat : null,
         locationLon: typeof locationLon === 'number' ? locationLon : null,
         locationNote: pin.id, // LOCATION_NOTICE에서는 이 필드를 "어느 핀 소속인지" 링크용으로 재사용함
+        locationStatus: 'PENDING', // 값을 명시적으로 채워서 null로 안 남게 함 (null이면 다음 번 변경 때 supersede 대상에서 누락됨)
       },
     });
     noticeMessage = serializeMessage(created);
