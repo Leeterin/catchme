@@ -36,7 +36,13 @@ function serializeMessage(message) {
   };
 
   if (message.type === 'TEXT') {
-    return { ...base, text: message.text };
+    return {
+      ...base,
+      text: message.text,
+      replyTo: message.replyToMessageId
+        ? { msgId: message.replyToMessageId, preview: message.replyToPreview }
+        : null,
+    };
   }
 
   if (message.type === 'TIME_PROPOSAL') {
@@ -440,7 +446,7 @@ async function listMessages(req, res) {
 // POST /api/chats/:roomId/messages   body: { text }
 async function sendTextMessage(req, res) {
   const { roomId } = req.params;
-  const { text } = req.body;
+  const { text, replyToMessageId, replyToPreview } = req.body;
 
   if (!text || !text.trim()) return res.status(400).json({ message: '메시지 내용을 입력해주세요.' });
   const canMessage = await assertCanMessage(roomId, req.userId);
@@ -449,7 +455,14 @@ async function sendTextMessage(req, res) {
   }
 
   const message = await prisma.message.create({
-    data: { chatRoomId: roomId, senderId: req.userId, type: 'TEXT', text: text.trim() },
+    data: {
+      chatRoomId: roomId,
+      senderId: req.userId,
+      type: 'TEXT',
+      text: text.trim(),
+      replyToMessageId: replyToMessageId || null,
+      replyToPreview: replyToMessageId ? (replyToPreview || null) : null,
+    },
   });
 
   await notifyRoom(roomId, req.userId, 'newMessage', { roomId, message: serializeMessage(message) });

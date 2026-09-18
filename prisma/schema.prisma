@@ -201,6 +201,10 @@ model Message {
 
   // TEXT 메시지일 때
   text String?
+  // 답장(다른 메시지를 인용)일 때 - 관계 대신 단순 참조로 둬서, 원본이 지워져도 이 메시지 자체는 안전함.
+  // 미리보기는 보낼 때 스냅샷으로 같이 저장해서, 원본이 삭제돼도(또는 아직 안 불러왔어도) 바로 보여줄 수 있게 함
+  replyToMessageId String?
+  replyToPreview   String?
 
   // RESERVATION 메시지일 때 (캘린더 매칭에서 이어지는 예약 요청)
   reservationStart  DateTime?
