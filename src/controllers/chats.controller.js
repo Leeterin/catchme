@@ -787,12 +787,40 @@ async function sendLocationSuggest(req, res) {
     return res.status(canMessage.statusCode).json({ message: canMessage.message });
   }
 
+  const trimmedPlace = place.trim();
+
+  // 아직 답변을 기다리고 있는(PENDING) 같은 장소 제안이 이미 있으면 중복으로 또 못 보내게 막음.
+  // 안 그러면 같은 곳을 여러 번 눌러 제안해서 "여기 어때요?" 카드가 채팅에 중복으로 쌓임
+  const duplicatePending = await prisma.message.findFirst({
+    where: {
+      chatRoomId: roomId,
+      type: 'LOCATION_SUGGEST',
+      locationStatus: 'PENDING',
+      locationPlace: { equals: trimmedPlace, mode: 'insensitive' },
+    },
+  });
+  if (duplicatePending) {
+    return res.status(409).json({ message: `"${trimmedPlace}"은(는) 이미 제안되어 답변을 기다리고 있어요.` });
+  }
+
+  // 이미 이 장소로 확정돼 있으면(날짜 없이 장소만 고정해둔 핀) 또 제안할 필요가 없음
+  const alreadyConfirmedPin = await prisma.pinnedItem.findFirst({
+    where: {
+      chatRoomId: roomId,
+      dateLabel: null,
+      location: { equals: trimmedPlace, mode: 'insensitive' },
+    },
+  });
+  if (alreadyConfirmedPin) {
+    return res.status(409).json({ message: `"${trimmedPlace}"은(는) 이미 확정된 장소예요.` });
+  }
+
   const message = await prisma.message.create({
     data: {
       chatRoomId: roomId,
       senderId: req.userId,
       type: 'LOCATION_SUGGEST',
-      locationPlace: place.trim(),
+      locationPlace: trimmedPlace,
       locationNote: note || null,
       locationAddress: location || null,
       locationLat: typeof locationLat === 'number' ? locationLat : null,
