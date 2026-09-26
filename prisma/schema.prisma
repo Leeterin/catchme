@@ -394,6 +394,8 @@ model FeedPost {
   category  String? // "food" | "cafe" | "experience" - 게시물 자체에 직접 저장함
   title     String? // 제목 (상호명 등) - 게시물 자체에 직접 저장함
   location  String? // 동네/역 이름 등
+  address   String? // 실제 도로명/지번 주소 (장소 검색으로 골랐을 때 자동 저장됨)
+  phone     String? // 가게 전화번호 (장소 검색 결과에 있으면 자동 저장됨)
   lat       Float?
   lon       Float?
   note      String?

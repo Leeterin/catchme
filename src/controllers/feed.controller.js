@@ -49,6 +49,8 @@ function serializePost(post, myUserId) {
     category: post.category || (post.place ? post.place.category : null),
     title: post.title || (post.place ? post.place.name : ''),
     location: post.location || (post.place ? post.place.location : null),
+    address: post.address || null,
+    phone: post.phone || null,
     lat: post.lat ?? (post.place ? post.place.lat : null),
     lon: post.lon ?? (post.place ? post.place.lon : null),
     note: post.note,
@@ -123,10 +125,10 @@ async function listFeedPosts(req, res) {
   return res.json({ posts: result });
 }
 
-// POST /api/feed   body: { category, title, note?, rating?, photos?, location?, lat?, lon? }
+// POST /api/feed   body: { category, title, note?, rating?, photos?, location?, address?, phone?, lat?, lon? }
 // 게시물을 독립적으로 하나 만듦 (다른 사람 글과 안 묶임)
 async function createFeedPost(req, res) {
-  const { category, title, note, rating, photos, location, lat, lon } = req.body;
+  const { category, title, note, rating, photos, location, address, phone, lat, lon } = req.body;
   if (!category || !category.trim()) {
     return res.status(400).json({ message: '카테고리를 선택해주세요.' });
   }
@@ -147,6 +149,8 @@ async function createFeedPost(req, res) {
       category: category.trim(),
       title: title.trim(),
       location: location || null,
+      address: (typeof address === 'string' && address.trim()) ? address.trim() : null,
+      phone: (typeof phone === 'string' && phone.trim()) ? phone.trim() : null,
       lat: typeof lat === 'number' ? lat : null,
       lon: typeof lon === 'number' ? lon : null,
       note: note || null,
@@ -159,7 +163,7 @@ async function createFeedPost(req, res) {
   return res.status(201).json({ post: serializePost(post, req.userId) });
 }
 
-// PATCH /api/feed/:id   body: { title?, note?, rating?, photos?, location? }  - 작성자 본인만 수정 가능
+// PATCH /api/feed/:id   body: { title?, note?, rating?, photos?, location?, address?, phone?, lat?, lon? }  - 작성자 본인만 수정 가능
 async function updateFeedPost(req, res) {
   const { id } = req.params;
   const post = await prisma.feedPost.findUnique({ where: { id } });
@@ -168,7 +172,7 @@ async function updateFeedPost(req, res) {
     return res.status(403).json({ message: '작성자만 수정할 수 있어요.' });
   }
 
-  const { title, note, rating, photos, location } = req.body;
+  const { title, note, rating, photos, location, address, phone, lat, lon } = req.body;
   const data = {};
   if (typeof title === 'string') {
     if (!title.trim()) return res.status(400).json({ message: '제목을 입력해주세요.' });
@@ -176,6 +180,11 @@ async function updateFeedPost(req, res) {
   }
   if (typeof note === 'string') data.note = note || null;
   if (typeof location === 'string') data.location = location || null;
+  // 주소/전화는 수정 폼에서 장소를 다시 검색해서 고르면 같이 갱신됨 (직접 입력 칸은 아님)
+  if (typeof address === 'string') data.address = address.trim() || null;
+  if (typeof phone === 'string') data.phone = phone.trim() || null;
+  if (typeof lat === 'number') data.lat = lat;
+  if (typeof lon === 'number') data.lon = lon;
   if (rating !== undefined) {
     if (rating !== null && (typeof rating !== 'number' || rating < 1 || rating > 5 || !Number.isInteger(rating))) {
       return res.status(400).json({ message: '별점은 1~5 사이의 정수여야 해요.' });
