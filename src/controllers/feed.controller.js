@@ -6,7 +6,7 @@ const MAX_PHOTOS = 5;
 const MIN_PHOTOS = 1;
 
 // 사진 배열이 올바른지 검사 (개수 제한, base64 이미지 형식, 용량 제한)
-// requireAtLeastOne이 true면 사진이 최소 1장은 있어야 함 (게시물은 항상 사진이 1~5장 있어야 하므로)
+// requireAtLeastOne이 true면 사진이 최소 1장은 있어야 함 - 지금은 사진 없이도 게시물을 올릴 수 있어서 항상 false로 씀 (호출부 참고)
 function validatePhotos(photos, { requireAtLeastOne } = {}) {
   if (photos === undefined || photos === null) {
     if (requireAtLeastOne) return { valid: null, error: `사진을 최소 ${MIN_PHOTOS}장 올려주세요.` };
@@ -140,7 +140,7 @@ async function createFeedPost(req, res) {
       return res.status(400).json({ message: '별점은 1~5 사이의 정수여야 해요.' });
     }
   }
-  const { valid: validPhotos, error: photoError } = validatePhotos(photos, { requireAtLeastOne: true });
+  const { valid: validPhotos, error: photoError } = validatePhotos(photos, { requireAtLeastOne: false });
   if (photoError) return res.status(400).json({ message: photoError });
 
   const post = await prisma.feedPost.create({
@@ -192,7 +192,7 @@ async function updateFeedPost(req, res) {
     data.rating = rating;
   }
   if (photos !== undefined) {
-    const { valid: validPhotos, error: photoError } = validatePhotos(photos, { requireAtLeastOne: true });
+    const { valid: validPhotos, error: photoError } = validatePhotos(photos, { requireAtLeastOne: false });
     if (photoError) return res.status(400).json({ message: photoError });
     data.photos = validPhotos || [];
   }
