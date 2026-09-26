@@ -35,6 +35,8 @@ function toPublicUser(user) {
     phonePublic: user.phonePublic,
     emailPublic: user.emailPublic,
     locationSharing: !!user.locationSharing,
+    reviewNickname: user.reviewNickname || null,
+    reviewAvatarUrl: user.reviewAvatarUrl || null,
     createdAt: user.createdAt,
   };
 }

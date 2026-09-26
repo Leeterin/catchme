@@ -8,9 +8,9 @@ const { USERNAME_RE } = require('../lib/validators');
 // 서버에서도 안전하게 최대 크기를 한 번 더 제한한다. (약 500KB)
 const MAX_IMAGE_CHARS = 700000; // base64 문자열 기준 대략 500KB
 
-// PATCH /api/profile   body: { name?, username?, bio?, phone?, phonePublic?, emailPublic?, profileImageUrl? }
+// PATCH /api/profile   body: { name?, username?, bio?, phone?, phonePublic?, emailPublic?, profileImageUrl?, reviewNickname?, reviewAvatarUrl? }
 async function updateProfile(req, res) {
-  const { name, username, bio, phone, phonePublic, emailPublic, profileImageUrl } = req.body;
+  const { name, username, bio, phone, phonePublic, emailPublic, profileImageUrl, reviewNickname, reviewAvatarUrl } = req.body;
   const data = {};
 
   if (typeof name === 'string' && name.trim()) data.name = name.trim();
@@ -42,6 +42,28 @@ async function updateProfile(req, res) {
         return res.status(400).json({ message: '이미지 용량이 너무 커요. 더 작은 사진을 사용해주세요.' });
       }
       data.profileImageUrl = profileImageUrl;
+    }
+  }
+
+  // 리뷰용(커뮤니티) 프로필 - 실명으로 리뷰 달기 창피할 수 있어서 만든 별도 닉네임/사진
+  if (typeof reviewNickname === 'string') {
+    const trimmed = reviewNickname.trim();
+    if (trimmed.length > 20) {
+      return res.status(400).json({ message: '리뷰 닉네임은 20자 이내로 입력해주세요.' });
+    }
+    data.reviewNickname = trimmed || null; // 빈 문자열로 보내면 다시 실명으로 돌아감
+  }
+  if (reviewAvatarUrl !== undefined) {
+    if (reviewAvatarUrl === null || reviewAvatarUrl === '') {
+      data.reviewAvatarUrl = null; // 삭제(기존 프로필 사진으로 대체됨)
+    } else if (typeof reviewAvatarUrl === 'string') {
+      if (!reviewAvatarUrl.startsWith('data:image/')) {
+        return res.status(400).json({ message: '이미지 형식이 올바르지 않아요.' });
+      }
+      if (reviewAvatarUrl.length > MAX_IMAGE_CHARS) {
+        return res.status(400).json({ message: '이미지 용량이 너무 커요. 더 작은 사진을 사용해주세요.' });
+      }
+      data.reviewAvatarUrl = reviewAvatarUrl;
     }
   }
 
