@@ -54,6 +54,11 @@ model User {
   phonePublic Boolean @default(false)
   emailPublic Boolean @default(true)
 
+  // 관리자 제재 - 정지되면 로그인 자체가 막힘 (관리자 페이지에서만 설정/해제 가능)
+  isSuspended     Boolean   @default(false)
+  suspendedReason String?
+  suspendedAt     DateTime?
+
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 

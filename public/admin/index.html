@@ -1,0 +1,536 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<meta name="robots" content="noindex, nofollow" />
+<title>CATCHME 관리자</title>
+<style>
+  :root{
+    --bg:#f5f6f8; --card:#ffffff; --line:#e5e7eb; --text:#111827; --text-dim:#6b7280;
+    --accent:#3b82f6; --danger:#ef4444; --danger-bg:#fef2f2; --warn:#f59e0b; --ok:#10b981;
+  }
+  *{ box-sizing:border-box; }
+  body{
+    margin:0; font-family:-apple-system,BlinkMacSystemFont,'Pretendard','Malgun Gothic',sans-serif;
+    background:var(--bg); color:var(--text); font-size:14px;
+  }
+  a{ color:inherit; }
+  button{ font-family:inherit; cursor:pointer; }
+
+  /* ---------- 로그인 화면 ---------- */
+  #loginScreen{
+    min-height:100vh; display:flex; align-items:center; justify-content:center; padding:20px;
+  }
+  .login-card{
+    width:100%; max-width:360px; background:var(--card); border:1px solid var(--line);
+    border-radius:16px; padding:32px 28px;
+  }
+  .login-card h1{ font-size:18px; margin:0 0 4px; }
+  .login-card p{ font-size:12.5px; color:var(--text-dim); margin:0 0 24px; }
+  .field{ margin-bottom:14px; }
+  .field label{ display:block; font-size:12px; color:var(--text-dim); margin-bottom:6px; }
+  .field input{
+    width:100%; padding:10px 12px; border:1px solid var(--line); border-radius:10px;
+    font-size:14px; outline:none;
+  }
+  .field input:focus{ border-color:var(--accent); }
+  .btn-primary{
+    width:100%; padding:11px; border:none; border-radius:10px; background:var(--text);
+    color:#fff; font-size:14px; font-weight:600; margin-top:8px;
+  }
+  .btn-primary:disabled{ opacity:0.5; cursor:default; }
+  .error-msg{ color:var(--danger); font-size:12.5px; margin-top:12px; display:none; }
+
+  /* ---------- 앱 레이아웃 ---------- */
+  #appScreen{ display:none; min-height:100vh; }
+  .topbar{
+    display:flex; align-items:center; justify-content:space-between;
+    padding:14px 24px; background:var(--card); border-bottom:1px solid var(--line);
+    position:sticky; top:0; z-index:10;
+  }
+  .topbar h1{ font-size:16px; margin:0; }
+  .topbar .who{ font-size:12.5px; color:var(--text-dim); }
+  .logout-btn{
+    border:1px solid var(--line); background:none; padding:6px 12px; border-radius:8px; font-size:12.5px;
+  }
+  .tabs{
+    display:flex; gap:4px; padding:10px 24px 0; background:var(--card); border-bottom:1px solid var(--line);
+  }
+  .tab-btn{
+    border:none; background:none; padding:10px 16px; font-size:13.5px; color:var(--text-dim);
+    border-bottom:2px solid transparent; font-weight:600;
+  }
+  .tab-btn.active{ color:var(--text); border-bottom-color:var(--text); }
+  .content{ max-width:960px; margin:0 auto; padding:24px; }
+  .section{ display:none; }
+  .section.active{ display:block; }
+
+  /* ---------- 대시보드 ---------- */
+  .stat-grid{ display:grid; grid-template-columns:repeat(auto-fit, minmax(180px,1fr)); gap:12px; }
+  .stat-card{
+    background:var(--card); border:1px solid var(--line); border-radius:14px; padding:16px 18px;
+  }
+  .stat-card .label{ font-size:12px; color:var(--text-dim); margin-bottom:6px; }
+  .stat-card .value{ font-size:24px; font-weight:700; }
+  .stat-card .sub{ font-size:11.5px; color:var(--text-dim); margin-top:4px; }
+
+  /* ---------- 공용 ---------- */
+  .toolbar{ display:flex; gap:8px; margin-bottom:16px; flex-wrap:wrap; align-items:center; }
+  .toolbar input[type=text]{
+    flex:1; min-width:180px; padding:9px 12px; border:1px solid var(--line); border-radius:9px; font-size:13.5px;
+  }
+  .toolbar select{
+    padding:9px 10px; border:1px solid var(--line); border-radius:9px; font-size:13.5px; background:#fff;
+  }
+  .toolbar button{
+    padding:9px 14px; border:1px solid var(--line); border-radius:9px; background:#fff; font-size:13px; font-weight:600;
+  }
+  .list-card{
+    background:var(--card); border:1px solid var(--line); border-radius:14px; overflow:hidden;
+  }
+  .row{
+    display:flex; align-items:center; gap:12px; padding:14px 18px; border-bottom:1px solid var(--line);
+  }
+  .row:last-child{ border-bottom:none; }
+  .row-main{ flex:1; min-width:0; }
+  .row-title{ font-weight:600; font-size:13.5px; display:flex; align-items:center; gap:6px; }
+  .row-sub{ font-size:12px; color:var(--text-dim); margin-top:2px; }
+  .badge{
+    font-size:10.5px; font-weight:700; padding:2px 7px; border-radius:6px; white-space:nowrap;
+  }
+  .badge.suspended{ background:var(--danger-bg); color:var(--danger); }
+  .badge.pending{ background:#fffbeb; color:var(--warn); }
+  .row-actions{ display:flex; gap:6px; flex-shrink:0; }
+  .row-actions button{
+    padding:6px 10px; border-radius:8px; border:1px solid var(--line); background:#fff; font-size:12px; font-weight:600;
+  }
+  .row-actions button.danger{ color:var(--danger); border-color:#fecaca; }
+  .row-actions button.ok{ color:var(--ok); border-color:#a7f3d0; }
+  .empty-state{ padding:40px 18px; text-align:center; color:var(--text-dim); font-size:13px; }
+  .pagination{ display:flex; justify-content:center; gap:8px; margin-top:16px; }
+  .pagination button{
+    padding:6px 12px; border:1px solid var(--line); background:#fff; border-radius:8px; font-size:12.5px;
+  }
+  .pagination button:disabled{ opacity:0.4; }
+  .toast{
+    position:fixed; bottom:24px; left:50%; transform:translateX(-50%);
+    background:#111827; color:#fff; padding:10px 18px; border-radius:10px; font-size:13px;
+    opacity:0; pointer-events:none; transition:opacity 0.2s; z-index:100;
+  }
+  .toast.show{ opacity:1; }
+</style>
+</head>
+<body>
+
+<div id="loginScreen">
+  <div class="login-card">
+    <h1>CATCHME 관리자</h1>
+    <p>관리자 계정으로만 접근할 수 있어요.</p>
+    <form id="loginForm">
+      <div class="field">
+        <label>아이디 또는 이메일</label>
+        <input type="text" id="loginId" autocomplete="username" required />
+      </div>
+      <div class="field">
+        <label>비밀번호</label>
+        <input type="password" id="loginPw" autocomplete="current-password" required />
+      </div>
+      <button type="submit" class="btn-primary" id="loginBtn">로그인</button>
+      <div class="error-msg" id="loginError"></div>
+    </form>
+  </div>
+</div>
+
+<div id="appScreen">
+  <div class="topbar">
+    <h1>CATCHME 관리자</h1>
+    <div style="display:flex; align-items:center; gap:12px;">
+      <span class="who" id="whoAmI"></span>
+      <button class="logout-btn" id="logoutBtn">로그아웃</button>
+    </div>
+  </div>
+  <div class="tabs">
+    <button class="tab-btn active" data-tab="dashboard">대시보드</button>
+    <button class="tab-btn" data-tab="users">유저 관리</button>
+    <button class="tab-btn" data-tab="reports">신고 처리</button>
+  </div>
+
+  <div class="content">
+    <div class="section active" id="section-dashboard">
+      <div class="stat-grid" id="statGrid"></div>
+    </div>
+
+    <div class="section" id="section-users">
+      <div class="toolbar">
+        <input type="text" id="userSearchInput" placeholder="아이디/이메일/이름으로 검색" />
+        <select id="userFilterSelect">
+          <option value="all">전체 유저</option>
+          <option value="suspended">정지된 계정만</option>
+        </select>
+        <button id="userSearchBtn">검색</button>
+      </div>
+      <div class="list-card" id="userList"></div>
+      <div class="pagination" id="userPagination"></div>
+    </div>
+
+    <div class="section" id="section-reports">
+      <div class="toolbar">
+        <select id="reportStatusSelect">
+          <option value="PENDING">대기중</option>
+          <option value="REVIEWED">처리됨</option>
+          <option value="DISMISSED">반려됨</option>
+        </select>
+        <button id="reportRefreshBtn">새로고침</button>
+      </div>
+      <div class="list-card" id="reportList"></div>
+      <div class="pagination" id="reportPagination"></div>
+    </div>
+  </div>
+</div>
+
+<div class="toast" id="toast"></div>
+
+<script>
+(function(){
+  'use strict';
+
+  const API_BASE = '/api';
+  let authToken = null;
+
+  // ---------- 공용 유틸 ----------
+  function escapeHtml(str){
+    return String(str == null ? '' : str).replace(/[&<>"']/g, (c) => ({
+      '&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'
+    }[c]));
+  }
+  function fmtDate(iso){
+    if(!iso) return '';
+    const d = new Date(iso);
+    return `${d.getFullYear()}.${String(d.getMonth()+1).padStart(2,'0')}.${String(d.getDate()).padStart(2,'0')} ${String(d.getHours()).padStart(2,'0')}:${String(d.getMinutes()).padStart(2,'0')}`;
+  }
+  let toastTimer = null;
+  function showToast(msg){
+    const el = document.getElementById('toast');
+    el.textContent = msg;
+    el.classList.add('show');
+    clearTimeout(toastTimer);
+    toastTimer = setTimeout(() => el.classList.remove('show'), 2200);
+  }
+
+  async function apiRequest(path, options){
+    options = options || {};
+    const headers = Object.assign({ 'Content-Type': 'application/json' }, options.headers || {});
+    if(authToken) headers.Authorization = 'Bearer ' + authToken;
+    const res = await fetch(API_BASE + path, Object.assign({}, options, { headers }));
+    let data = null;
+    try { data = await res.json(); } catch(e) { data = null; }
+    if(!res.ok){
+      const err = new Error((data && data.message) || `요청 실패 (${res.status})`);
+      err.status = res.status;
+      throw err;
+    }
+    return data;
+  }
+
+  // ---------- 로그인 ----------
+  function setAuthToken(token){
+    authToken = token;
+    try { if(token) localStorage.setItem('catchme_admin_token', token); else localStorage.removeItem('catchme_admin_token'); } catch(e){}
+  }
+
+  async function tryAutoLogin(){
+    let saved = null;
+    try { saved = localStorage.getItem('catchme_admin_token'); } catch(e){}
+    if(!saved) return showLogin();
+    authToken = saved;
+    try {
+      await apiRequest('/admin/overview');
+      showApp();
+    } catch(e) {
+      setAuthToken(null);
+      showLogin();
+    }
+  }
+
+  function showLogin(){
+    document.getElementById('loginScreen').style.display = 'flex';
+    document.getElementById('appScreen').style.display = 'none';
+  }
+  function showApp(){
+    document.getElementById('loginScreen').style.display = 'none';
+    document.getElementById('appScreen').style.display = 'block';
+    loadDashboard();
+  }
+
+  document.getElementById('loginForm').addEventListener('submit', async (e) => {
+    e.preventDefault();
+    const emailOrUsername = document.getElementById('loginId').value.trim();
+    const password = document.getElementById('loginPw').value;
+    const errEl = document.getElementById('loginError');
+    const btn = document.getElementById('loginBtn');
+    errEl.style.display = 'none';
+    btn.disabled = true;
+    btn.textContent = '로그인 중...';
+    try {
+      const res = await fetch(API_BASE + '/auth/login', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ emailOrUsername, password }),
+      });
+      const data = await res.json();
+      if(!res.ok) throw new Error(data.message || '로그인에 실패했어요.');
+
+      authToken = data.token;
+      // 로그인은 됐어도 관리자 계정이 아니면 여기서 막힘 (서버가 진짜 게이트키퍼라 이건 그냥 UX용 확인)
+      try {
+        await apiRequest('/admin/overview');
+      } catch(adminErr){
+        authToken = null;
+        throw new Error(adminErr.status === 403 ? '관리자 계정이 아니에요.' : '확인 중 오류가 발생했어요.');
+      }
+      setAuthToken(data.token);
+      document.getElementById('whoAmI').textContent = data.user ? `${data.user.name} (@${data.user.username})` : '';
+      showApp();
+    } catch(err) {
+      errEl.textContent = err.message;
+      errEl.style.display = 'block';
+    } finally {
+      btn.disabled = false;
+      btn.textContent = '로그인';
+    }
+  });
+
+  document.getElementById('logoutBtn').addEventListener('click', () => {
+    setAuthToken(null);
+    showLogin();
+  });
+
+  // ---------- 탭 전환 ----------
+  document.querySelectorAll('.tab-btn').forEach((btn) => {
+    btn.addEventListener('click', () => {
+      document.querySelectorAll('.tab-btn').forEach((b) => b.classList.remove('active'));
+      document.querySelectorAll('.section').forEach((s) => s.classList.remove('active'));
+      btn.classList.add('active');
+      document.getElementById('section-' + btn.dataset.tab).classList.add('active');
+      if(btn.dataset.tab === 'dashboard') loadDashboard();
+      if(btn.dataset.tab === 'users') loadUsers();
+      if(btn.dataset.tab === 'reports') loadReports();
+    });
+  });
+
+  // ---------- 대시보드 ----------
+  async function loadDashboard(){
+    const grid = document.getElementById('statGrid');
+    grid.innerHTML = '<div class="empty-state">불러오는 중...</div>';
+    try {
+      const data = await apiRequest('/admin/overview');
+      grid.innerHTML = `
+        <div class="stat-card">
+          <div class="label">전체 유저</div>
+          <div class="value">${data.users.total.toLocaleString()}</div>
+          <div class="sub">이번 주 신규 ${data.users.newThisWeek}명 · 정지 ${data.users.suspended}명</div>
+        </div>
+        <div class="stat-card">
+          <div class="label">소식 게시물</div>
+          <div class="value">${data.feedPosts.total.toLocaleString()}</div>
+        </div>
+        <div class="stat-card">
+          <div class="label">모임</div>
+          <div class="value">${data.meetups.total.toLocaleString()}</div>
+          <div class="sub">진행중 ${data.meetups.active}개</div>
+        </div>
+        <div class="stat-card">
+          <div class="label">전체 메시지</div>
+          <div class="value">${data.messages.total.toLocaleString()}</div>
+          <div class="sub">오늘 ${data.messages.today.toLocaleString()}건</div>
+        </div>
+        <div class="stat-card">
+          <div class="label">처리 대기중 신고</div>
+          <div class="value" style="color:${data.reports.pending > 0 ? '#ef4444' : '#111827'}">${data.reports.pending}</div>
+          <div class="sub">누적 신고 ${data.reports.total}건</div>
+        </div>
+      `;
+    } catch(err) {
+      grid.innerHTML = `<div class="empty-state">통계를 불러오지 못했어요: ${escapeHtml(err.message)}</div>`;
+    }
+  }
+
+  // ---------- 유저 관리 ----------
+  let userPage = 1;
+  async function loadUsers(page){
+    userPage = page || 1;
+    const listEl = document.getElementById('userList');
+    listEl.innerHTML = '<div class="empty-state">불러오는 중...</div>';
+    const q = document.getElementById('userSearchInput').value.trim();
+    const filter = document.getElementById('userFilterSelect').value;
+    try {
+      const data = await apiRequest(`/admin/users?page=${userPage}&q=${encodeURIComponent(q)}&filter=${filter}`);
+      if(data.users.length === 0){
+        listEl.innerHTML = '<div class="empty-state">조건에 맞는 유저가 없어요.</div>';
+      } else {
+        listEl.innerHTML = data.users.map((u) => `
+          <div class="row" data-id="${u.id}">
+            <div class="row-main">
+              <div class="row-title">
+                ${escapeHtml(u.name)} <span style="color:var(--text-dim); font-weight:400;">@${escapeHtml(u.username)}</span>
+                ${u.isSuspended ? '<span class="badge suspended">정지됨</span>' : ''}
+              </div>
+              <div class="row-sub">${escapeHtml(u.email)} · 가입 ${fmtDate(u.createdAt)} · 소식 ${u.counts.feedPosts} · 모임 ${u.counts.meetups} · 신고이력 ${u.counts.reportsMade}</div>
+              ${u.isSuspended && u.suspendedReason ? `<div class="row-sub" style="color:var(--danger);">정지 사유: ${escapeHtml(u.suspendedReason)}</div>` : ''}
+            </div>
+            <div class="row-actions">
+              ${u.isSuspended
+                ? `<button class="ok" data-action="unsuspend">정지 해제</button>`
+                : `<button class="danger" data-action="suspend">정지</button>`}
+              <button class="danger" data-action="delete">삭제</button>
+            </div>
+          </div>
+        `).join('');
+        wireUserRowActions(listEl);
+      }
+      renderPagination('userPagination', data.page, data.totalPages, loadUsers);
+    } catch(err) {
+      listEl.innerHTML = `<div class="empty-state">${escapeHtml(err.message)}</div>`;
+    }
+  }
+
+  function wireUserRowActions(listEl){
+    listEl.querySelectorAll('.row').forEach((row) => {
+      const id = row.dataset.id;
+      const suspendBtn = row.querySelector('[data-action="suspend"]');
+      const unsuspendBtn = row.querySelector('[data-action="unsuspend"]');
+      const deleteBtn = row.querySelector('[data-action="delete"]');
+      if(suspendBtn) suspendBtn.addEventListener('click', async () => {
+        const reason = prompt('정지 사유를 입력해주세요 (선택)') || '';
+        try {
+          await apiRequest(`/admin/users/${id}/suspend`, { method: 'POST', body: JSON.stringify({ reason }) });
+          showToast('계정을 정지시켰어요.');
+          loadUsers(userPage);
+        } catch(err) { showToast(err.message); }
+      });
+      if(unsuspendBtn) unsuspendBtn.addEventListener('click', async () => {
+        try {
+          await apiRequest(`/admin/users/${id}/unsuspend`, { method: 'POST' });
+          showToast('정지를 해제했어요.');
+          loadUsers(userPage);
+        } catch(err) { showToast(err.message); }
+      });
+      if(deleteBtn) deleteBtn.addEventListener('click', async () => {
+        if(!confirm('정말 이 계정을 완전히 삭제할까요? 되돌릴 수 없어요.')) return;
+        try {
+          await apiRequest(`/admin/users/${id}`, { method: 'DELETE' });
+          showToast('계정을 삭제했어요.');
+          loadUsers(userPage);
+        } catch(err) { showToast(err.message); }
+      });
+    });
+  }
+
+  document.getElementById('userSearchBtn').addEventListener('click', () => loadUsers(1));
+  document.getElementById('userSearchInput').addEventListener('keydown', (e) => { if(e.key === 'Enter') loadUsers(1); });
+  document.getElementById('userFilterSelect').addEventListener('change', () => loadUsers(1));
+
+  // ---------- 신고 처리 ----------
+  let reportPage = 1;
+  const TARGET_TYPE_LABEL = { FEED_POST: '소식 게시물', MEETUP: '모임', USER: '유저' };
+
+  async function loadReports(page){
+    reportPage = page || 1;
+    const listEl = document.getElementById('reportList');
+    listEl.innerHTML = '<div class="empty-state">불러오는 중...</div>';
+    const status = document.getElementById('reportStatusSelect').value;
+    try {
+      const data = await apiRequest(`/admin/reports?page=${reportPage}&status=${status}`);
+      if(data.reports.length === 0){
+        listEl.innerHTML = '<div class="empty-state">해당하는 신고가 없어요.</div>';
+      } else {
+        listEl.innerHTML = data.reports.map((r) => `
+          <div class="row" data-id="${r.id}" data-target-type="${r.targetType}">
+            <div class="row-main">
+              <div class="row-title">
+                [${TARGET_TYPE_LABEL[r.targetType] || r.targetType}] ${escapeHtml(r.target.exists ? r.target.title : '(이미 삭제된 콘텐츠)')}
+                ${r.status === 'PENDING' ? '<span class="badge pending">대기중</span>' : ''}
+              </div>
+              <div class="row-sub">
+                사유: ${escapeHtml(r.reason)}${r.detail ? ` — ${escapeHtml(r.detail)}` : ''}
+              </div>
+              <div class="row-sub">
+                신고자 @${escapeHtml(r.reporter.username)}
+                ${r.target.author ? ` · 대상 @${escapeHtml(r.target.author.username)}` : ''}
+                · ${fmtDate(r.createdAt)}
+              </div>
+            </div>
+            ${r.status === 'PENDING' ? `
+              <div class="row-actions">
+                <button data-action="dismiss">반려</button>
+                ${r.targetType === 'USER'
+                  ? `<button class="danger" data-action="suspend-user">유저 정지</button>`
+                  : `<button class="danger" data-action="delete-content">콘텐츠 삭제</button>`}
+              </div>
+            ` : ''}
+          </div>
+        `).join('');
+        wireReportRowActions(listEl);
+      }
+      renderPagination('reportPagination', data.page, data.totalPages, loadReports);
+    } catch(err) {
+      listEl.innerHTML = `<div class="empty-state">${escapeHtml(err.message)}</div>`;
+    }
+  }
+
+  function wireReportRowActions(listEl){
+    listEl.querySelectorAll('.row').forEach((row) => {
+      const id = row.dataset.id;
+      const dismissBtn = row.querySelector('[data-action="dismiss"]');
+      const suspendBtn = row.querySelector('[data-action="suspend-user"]');
+      const deleteBtn = row.querySelector('[data-action="delete-content"]');
+      if(dismissBtn) dismissBtn.addEventListener('click', async () => {
+        try {
+          await apiRequest(`/admin/reports/${id}/resolve`, { method: 'POST', body: JSON.stringify({ action: 'DISMISS' }) });
+          showToast('신고를 반려했어요.');
+          loadReports(reportPage);
+        } catch(err) { showToast(err.message); }
+      });
+      if(suspendBtn) suspendBtn.addEventListener('click', async () => {
+        if(!confirm('신고된 유저 계정을 정지할까요?')) return;
+        try {
+          await apiRequest(`/admin/reports/${id}/resolve`, { method: 'POST', body: JSON.stringify({ action: 'SUSPEND_USER' }) });
+          showToast('유저를 정지시켰어요.');
+          loadReports(reportPage);
+        } catch(err) { showToast(err.message); }
+      });
+      if(deleteBtn) deleteBtn.addEventListener('click', async () => {
+        if(!confirm('신고된 콘텐츠를 삭제할까요? 되돌릴 수 없어요.')) return;
+        try {
+          await apiRequest(`/admin/reports/${id}/resolve`, { method: 'POST', body: JSON.stringify({ action: 'DELETE_CONTENT' }) });
+          showToast('콘텐츠를 삭제했어요.');
+          loadReports(reportPage);
+        } catch(err) { showToast(err.message); }
+      });
+    });
+  }
+
+  document.getElementById('reportRefreshBtn').addEventListener('click', () => loadReports(reportPage));
+  document.getElementById('reportStatusSelect').addEventListener('change', () => loadReports(1));
+
+  // ---------- 페이지네이션 공용 ----------
+  function renderPagination(elId, page, totalPages, loadFn){
+    const el = document.getElementById(elId);
+    if(totalPages <= 1){ el.innerHTML = ''; return; }
+    el.innerHTML = `
+      <button ${page <= 1 ? 'disabled' : ''} id="${elId}-prev">이전</button>
+      <span style="align-self:center; font-size:12.5px; color:var(--text-dim);">${page} / ${totalPages}</span>
+      <button ${page >= totalPages ? 'disabled' : ''} id="${elId}-next">다음</button>
+    `;
+    const prevBtn = document.getElementById(`${elId}-prev`);
+    const nextBtn = document.getElementById(`${elId}-next`);
+    if(prevBtn) prevBtn.addEventListener('click', () => loadFn(page - 1));
+    if(nextBtn) nextBtn.addEventListener('click', () => loadFn(page + 1));
+  }
+
+  tryAutoLogin();
+})();
+</script>
+</body>
+</html>
