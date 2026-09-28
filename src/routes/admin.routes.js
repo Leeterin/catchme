@@ -2,8 +2,12 @@ const express = require('express');
 const { requireAuth } = require('../middleware/auth.middleware');
 const { requireAdmin } = require('../middleware/admin.middleware');
 const {
-  getOverview, listUsers, getUserDetail, suspendUser, unsuspendUser, deleteUser,
+  getOverview,
+  listUsers, suspendUser, unsuspendUser, deleteUser,
   listReports, resolveReport,
+  listFeedPosts, deleteFeedPost,
+  listMeetups, cancelMeetup,
+  listAdminLogs,
 } = require('../controllers/admin.controller');
 
 const router = express.Router();
@@ -15,12 +19,19 @@ router.use(requireAuth, requireAdmin);
 router.get('/overview', getOverview);
 
 router.get('/users', listUsers);
-router.get('/users/:id', getUserDetail);
 router.post('/users/:id/suspend', suspendUser);
 router.post('/users/:id/unsuspend', unsuspendUser);
 router.delete('/users/:id', deleteUser);
 
 router.get('/reports', listReports);
 router.post('/reports/:id/resolve', resolveReport);
+
+router.get('/feed-posts', listFeedPosts);
+router.delete('/feed-posts/:id', deleteFeedPost);
+
+router.get('/meetups', listMeetups);
+router.post('/meetups/:id/cancel', cancelMeetup);
+
+router.get('/logs', listAdminLogs);
 
 module.exports = router;

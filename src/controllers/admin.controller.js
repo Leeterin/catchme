@@ -1,5 +1,16 @@
 const prisma = require('../lib/prisma');
 
+// 관리자 행동 기록 - 실패해도(로그 자체 오류) 원래 하려던 작업까지 막지는 않도록 에러를 삼킴
+async function logAdminAction(actorId, action, { targetType, targetId, detail } = {}) {
+  try {
+    await prisma.adminActionLog.create({
+      data: { actorId, action, targetType: targetType || null, targetId: targetId || null, detail: detail || null },
+    });
+  } catch (err) {
+    console.error('[logAdminAction] error:', err);
+  }
+}
+
 // GET /api/admin/overview - 대시보드용 요약 통계
 async function getOverview(req, res) {
   const now = new Date();
@@ -33,7 +44,9 @@ async function getOverview(req, res) {
   });
 }
 
-// 목록/상세 응답에 비밀번호 등 민감정보 없이 내려주는 유저 모양
+// ------------------------------------------------------------
+// 유저 관리
+// ------------------------------------------------------------
 function serializeAdminUser(user) {
   return {
     id: user.id,
@@ -77,9 +90,7 @@ async function listUsers(req, res) {
       orderBy: { createdAt: 'desc' },
       skip: (page - 1) * limit,
       take: limit,
-      include: {
-        _count: { select: { feedPosts: true, createdMeetups: true, reportsMade: true } },
-      },
+      include: { _count: { select: { feedPosts: true, createdMeetups: true, reportsMade: true } } },
     }),
     prisma.user.count({ where }),
   ]);
@@ -91,37 +102,23 @@ async function listUsers(req, res) {
   });
 }
 
-// GET /api/admin/users/:id
-async function getUserDetail(req, res) {
-  const user = await prisma.user.findUnique({
-    where: { id: req.params.id },
-    include: {
-      _count: { select: { feedPosts: true, createdMeetups: true, reportsMade: true } },
-    },
-  });
-  if (!user) return res.status(404).json({ message: '유저를 찾을 수 없어요.' });
-  return res.json({ user: serializeAdminUser(user) });
-}
-
 // POST /api/admin/users/:id/suspend   body: { reason }
 async function suspendUser(req, res) {
   const { id } = req.params;
   const { reason } = req.body;
 
-  const target = await prisma.user.findUnique({ where: { id }, select: { email: true, username: true } });
+  const target = await prisma.user.findUnique({ where: { id }, select: { id: true, username: true } });
   if (!target) return res.status(404).json({ message: '유저를 찾을 수 없어요.' });
 
+  const trimmedReason = reason ? String(reason).trim().slice(0, 300) : null;
   const user = await prisma.user.update({
     where: { id },
-    data: {
-      isSuspended: true,
-      suspendedReason: reason ? String(reason).trim().slice(0, 300) : null,
-      suspendedAt: new Date(),
-    },
+    data: { isSuspended: true, suspendedReason: trimmedReason, suspendedAt: new Date() },
   });
 
   // 정지된 계정은 현재 로그인 세션도 전부 끊어서, 이미 로그인돼있어도 다음 요청부터 다시 로그인해야 함
   await prisma.refreshToken.deleteMany({ where: { userId: id } });
+  await logAdminAction(req.userId, 'SUSPEND_USER', { targetType: 'USER', targetId: id, detail: `@${target.username}${trimmedReason ? ` - ${trimmedReason}` : ''}` });
 
   return res.json({ message: '계정을 정지시켰어요.', user: serializeAdminUser(user) });
 }
@@ -129,27 +126,27 @@ async function suspendUser(req, res) {
 // POST /api/admin/users/:id/unsuspend
 async function unsuspendUser(req, res) {
   const { id } = req.params;
-  const target = await prisma.user.findUnique({ where: { id } });
+  const target = await prisma.user.findUnique({ where: { id }, select: { id: true, username: true } });
   if (!target) return res.status(404).json({ message: '유저를 찾을 수 없어요.' });
 
   const user = await prisma.user.update({
     where: { id },
     data: { isSuspended: false, suspendedReason: null, suspendedAt: null },
   });
+  await logAdminAction(req.userId, 'UNSUSPEND_USER', { targetType: 'USER', targetId: id, detail: `@${target.username}` });
 
   return res.json({ message: '정지를 해제했어요.', user: serializeAdminUser(user) });
 }
 
 // DELETE /api/admin/users/:id - 계정 완전 삭제 (되돌릴 수 없음)
-// 이 사람이 만든 약속방(MatchingRoom)이 있으면 FK 제약으로 삭제가 막힐 수 있어서, 그런 경우엔
-// 안내 메시지로 알려주고 대신 정지를 권함 (무리하게 연쇄삭제하면 다른 사람 데이터까지 날아갈 수 있어서 안전하게 처리)
 async function deleteUser(req, res) {
   const { id } = req.params;
-  const target = await prisma.user.findUnique({ where: { id }, select: { id: true } });
+  const target = await prisma.user.findUnique({ where: { id }, select: { id: true, username: true } });
   if (!target) return res.status(404).json({ message: '유저를 찾을 수 없어요.' });
 
   try {
     await prisma.user.delete({ where: { id } });
+    await logAdminAction(req.userId, 'DELETE_USER', { targetType: 'USER', targetId: id, detail: `@${target.username}` });
     return res.json({ message: '계정을 삭제했어요.' });
   } catch (err) {
     if (err.code === 'P2003') {
@@ -162,8 +159,9 @@ async function deleteUser(req, res) {
   }
 }
 
-// 신고 대상(targetType/targetId)의 실제 내용을 조회해서 신고 목록에 같이 보여줌 -
-// Report가 여러 종류(FEED_POST/MEETUP/USER)를 하나의 targetId로 느슨하게 참조하고 있어서 직접 조회함
+// ------------------------------------------------------------
+// 신고 처리
+// ------------------------------------------------------------
 async function resolveTargetPreview(report) {
   try {
     if (report.targetType === 'FEED_POST') {
@@ -238,6 +236,7 @@ async function resolveReport(req, res) {
 
   if (action === 'DISMISS') {
     await prisma.report.update({ where: { id }, data: { status: 'DISMISSED' } });
+    await logAdminAction(req.userId, 'RESOLVE_REPORT', { targetType: 'REPORT', targetId: id, detail: '반려' });
     return res.json({ message: '신고를 반려 처리했어요.' });
   }
 
@@ -251,6 +250,7 @@ async function resolveReport(req, res) {
     }).catch(() => null);
     await prisma.refreshToken.deleteMany({ where: { userId: report.targetId } });
     await prisma.report.update({ where: { id }, data: { status: 'REVIEWED' } });
+    await logAdminAction(req.userId, 'RESOLVE_REPORT', { targetType: 'REPORT', targetId: id, detail: '유저 정지' });
     return res.json({ message: '해당 계정을 정지시키고 신고를 처리했어요.' });
   }
 
@@ -263,13 +263,181 @@ async function resolveReport(req, res) {
       return res.status(400).json({ message: '이 신고 대상은 콘텐츠 삭제 대상이 아니에요.' });
     }
     await prisma.report.update({ where: { id }, data: { status: 'REVIEWED' } });
+    await logAdminAction(req.userId, 'RESOLVE_REPORT', { targetType: 'REPORT', targetId: id, detail: '콘텐츠 삭제' });
     return res.json({ message: '신고된 콘텐츠를 삭제하고 신고를 처리했어요.' });
   }
 
   return res.status(400).json({ message: '올바르지 않은 처리 방식이에요.' });
 }
 
+// ------------------------------------------------------------
+// 소식(피드) 게시물 관리 - 신고 없이도 직접 검색해서 삭제 가능
+// ------------------------------------------------------------
+// GET /api/admin/feed-posts?q=&page=&limit=
+async function listFeedPosts(req, res) {
+  const q = String(req.query.q || '').trim();
+  const page = Math.max(parseInt(req.query.page, 10) || 1, 1);
+  const limit = Math.min(Math.max(parseInt(req.query.limit, 10) || 30, 1), 100);
+
+  const where = q ? {
+    OR: [
+      { title: { contains: q, mode: 'insensitive' } },
+      { note: { contains: q, mode: 'insensitive' } },
+      { location: { contains: q, mode: 'insensitive' } },
+      { author: { is: { username: { contains: q, mode: 'insensitive' } } } },
+    ],
+  } : {};
+
+  const [posts, total] = await Promise.all([
+    prisma.feedPost.findMany({
+      where,
+      orderBy: { createdAt: 'desc' },
+      skip: (page - 1) * limit,
+      take: limit,
+      include: {
+        author: { select: { id: true, username: true, name: true } },
+        _count: { select: { likes: true, comments: true } },
+      },
+    }),
+    prisma.feedPost.count({ where }),
+  ]);
+
+  return res.json({
+    posts: posts.map((p) => ({
+      id: p.id,
+      category: p.category,
+      title: p.title,
+      note: p.note,
+      location: p.location,
+      rating: p.rating,
+      photoCount: (p.photos || []).length,
+      createdAt: p.createdAt,
+      author: p.author,
+      likeCount: p._count.likes,
+      commentCount: p._count.comments,
+    })),
+    page, limit, total,
+    totalPages: Math.max(Math.ceil(total / limit), 1),
+  });
+}
+
+// DELETE /api/admin/feed-posts/:id
+async function deleteFeedPost(req, res) {
+  const { id } = req.params;
+  const post = await prisma.feedPost.findUnique({ where: { id }, select: { id: true, title: true, note: true } });
+  if (!post) return res.status(404).json({ message: '게시물을 찾을 수 없어요.' });
+
+  await prisma.feedPost.delete({ where: { id } });
+  await logAdminAction(req.userId, 'DELETE_FEED_POST', { targetType: 'FEED_POST', targetId: id, detail: post.title || post.note || null });
+
+  return res.json({ message: '게시물을 삭제했어요.' });
+}
+
+// ------------------------------------------------------------
+// 모임 관리 - 신고 없이도 직접 강제 취소 가능
+// ------------------------------------------------------------
+// GET /api/admin/meetups?q=&page=&limit=&filter=(all|active|cancelled)
+async function listMeetups(req, res) {
+  const q = String(req.query.q || '').trim();
+  const filter = ['active', 'cancelled'].includes(req.query.filter) ? req.query.filter : 'all';
+  const page = Math.max(parseInt(req.query.page, 10) || 1, 1);
+  const limit = Math.min(Math.max(parseInt(req.query.limit, 10) || 30, 1), 100);
+
+  const where = {
+    ...(filter === 'active' ? { cancelled: false } : filter === 'cancelled' ? { cancelled: true } : {}),
+    ...(q ? {
+      OR: [
+        { title: { contains: q, mode: 'insensitive' } },
+        { location: { contains: q, mode: 'insensitive' } },
+        { creator: { is: { username: { contains: q, mode: 'insensitive' } } } },
+      ],
+    } : {}),
+  };
+
+  const [meetups, total] = await Promise.all([
+    prisma.meetup.findMany({
+      where,
+      orderBy: { createdAt: 'desc' },
+      skip: (page - 1) * limit,
+      take: limit,
+      include: {
+        creator: { select: { id: true, username: true, name: true } },
+        _count: { select: { participants: true } },
+      },
+    }),
+    prisma.meetup.count({ where }),
+  ]);
+
+  return res.json({
+    meetups: meetups.map((m) => ({
+      id: m.id,
+      title: m.title,
+      category: m.category,
+      location: m.location,
+      dateLabel: m.dateLabel,
+      timeLabel: m.timeLabel,
+      cancelled: m.cancelled,
+      participantCount: m._count.participants,
+      maxParticipants: m.maxParticipants,
+      creator: m.creator,
+      createdAt: m.createdAt,
+    })),
+    page, limit, total,
+    totalPages: Math.max(Math.ceil(total / limit), 1),
+  });
+}
+
+// POST /api/admin/meetups/:id/cancel
+async function cancelMeetup(req, res) {
+  const { id } = req.params;
+  const meetup = await prisma.meetup.findUnique({ where: { id }, select: { id: true, title: true, cancelled: true } });
+  if (!meetup) return res.status(404).json({ message: '모임을 찾을 수 없어요.' });
+  if (meetup.cancelled) return res.status(400).json({ message: '이미 취소된 모임이에요.' });
+
+  await prisma.meetup.update({ where: { id }, data: { cancelled: true } });
+  await logAdminAction(req.userId, 'CANCEL_MEETUP', { targetType: 'MEETUP', targetId: id, detail: meetup.title });
+
+  return res.json({ message: '모임을 취소시켰어요. (채팅방은 그대로 유지돼요)' });
+}
+
+// ------------------------------------------------------------
+// 관리자 행동 로그
+// ------------------------------------------------------------
+// GET /api/admin/logs?page=&limit=
+async function listAdminLogs(req, res) {
+  const page = Math.max(parseInt(req.query.page, 10) || 1, 1);
+  const limit = Math.min(Math.max(parseInt(req.query.limit, 10) || 50, 1), 100);
+
+  const [logs, total] = await Promise.all([
+    prisma.adminActionLog.findMany({
+      orderBy: { createdAt: 'desc' },
+      skip: (page - 1) * limit,
+      take: limit,
+      include: { actor: { select: { username: true, name: true } } },
+    }),
+    prisma.adminActionLog.count(),
+  ]);
+
+  return res.json({
+    logs: logs.map((l) => ({
+      id: l.id,
+      action: l.action,
+      targetType: l.targetType,
+      targetId: l.targetId,
+      detail: l.detail,
+      actor: l.actor,
+      createdAt: l.createdAt,
+    })),
+    page, limit, total,
+    totalPages: Math.max(Math.ceil(total / limit), 1),
+  });
+}
+
 module.exports = {
-  getOverview, listUsers, getUserDetail, suspendUser, unsuspendUser, deleteUser,
+  getOverview,
+  listUsers, suspendUser, unsuspendUser, deleteUser,
   listReports, resolveReport,
+  listFeedPosts, deleteFeedPost,
+  listMeetups, cancelMeetup,
+  listAdminLogs,
 };
