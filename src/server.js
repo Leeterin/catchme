@@ -4,6 +4,7 @@
 process.env.TZ = 'Asia/Seoul';
 
 require('dotenv').config();
+const path = require('path');
 const http = require('http');
 const express = require('express');
 const cors = require('cors');
@@ -20,6 +21,7 @@ const meetupsRoutes = require('./routes/meetups.routes');
 const settingsRoutes = require('./routes/settings.routes');
 const feedRoutes = require('./routes/feed.routes');
 const reportsRoutes = require('./routes/reports.routes');
+const adminRoutes = require('./routes/admin.routes');
 const { errorHandler, notFoundHandler } = require('./middleware/errorHandler');
 const { setIo } = require('./lib/socket');
 
@@ -80,6 +82,12 @@ app.use('/api/settings', settingsRoutes);
 app.use('/api/feed', feedRoutes);
 app.use('/api/reports', reportsRoutes);
 app.use('/api/users', require('./routes/avatar.routes'));
+app.use('/api/admin', adminRoutes);
+
+// 별도 관리자 페이지 - 일반 유저 앱(catchme-F 저장소)과는 완전히 분리된 정적 페이지.
+// 이 페이지를 열 수 있다는 것 자체는 누구나 가능하지만, 안의 모든 API 호출은 /api/admin/*
+// 이라 위 adminRoutes(requireAuth + requireAdmin)를 통과 못 하면 아무 데이터도 못 봄.
+app.use('/admin', express.static(path.join(__dirname, '../public/admin')));
 
 app.use(notFoundHandler);
 app.use(errorHandler);

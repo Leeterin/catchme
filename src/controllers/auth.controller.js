@@ -123,6 +123,13 @@ async function login(req, res) {
     const passwordMatches = await bcrypt.compare(password, user.passwordHash);
     if (!passwordMatches) return res.status(401).json(invalidMsg);
 
+    // 관리자가 정지시킨 계정은 비밀번호가 맞아도 로그인 자체가 안 됨
+    if (user.isSuspended) {
+      return res.status(403).json({
+        message: `이용이 제한된 계정이에요.${user.suspendedReason ? ` (사유: ${user.suspendedReason})` : ''}`,
+      });
+    }
+
     const token = signAccessToken(user.id);
     const refreshToken = await createRefreshToken(user.id);
 

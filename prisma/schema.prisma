@@ -54,6 +54,11 @@ model User {
   phonePublic Boolean @default(false)
   emailPublic Boolean @default(true)
 
+  // 관리자 제재 - 정지되면 로그인 자체가 막힘 (관리자 페이지에서만 설정/해제 가능)
+  isSuspended     Boolean   @default(false)
+  suspendedReason String?
+  suspendedAt     DateTime?
+
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
@@ -83,6 +88,7 @@ model User {
   sentMessages        Message[]
   refreshTokens       RefreshToken[]
   passwordResetTokens PasswordResetToken[]
+  adminActionLogs     AdminActionLog[]
 
   @@map("users")
 }
@@ -558,6 +564,23 @@ model Report {
   createdAt  DateTime @default(now())
 
   @@map("reports")
+}
+
+// 관리자 행동 기록 - 누가(actor) 언제 어떤 조치를(유저 정지/삭제, 게시물 삭제, 모임 취소, 신고 처리 등)
+// 했는지 남겨두는 감사 로그. 지금은 관리자가 혼자라 당장 급하진 않지만, 나중에 "내가 왜 이걸 정지시켰지"
+// 확인하거나 관리자가 여러 명이 될 때를 대비해 처음부터 남겨둠.
+model AdminActionLog {
+  id         String   @id @default(uuid())
+  actorId    String
+  actor      User     @relation(fields: [actorId], references: [id], onDelete: Cascade)
+  action     String // "SUSPEND_USER" | "UNSUSPEND_USER" | "DELETE_USER" | "DELETE_FEED_POST" | "CANCEL_MEETUP" | "RESOLVE_REPORT" 등
+  targetType String? // "USER" | "FEED_POST" | "MEETUP" | "REPORT"
+  targetId   String?
+  detail     String?
+  createdAt  DateTime @default(now())
+
+  @@index([createdAt])
+  @@map("admin_action_logs")
 }
 
 // ------------------------------------------------------------
