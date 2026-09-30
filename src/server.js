@@ -1,3 +1,7 @@
+// Sentry는 express 등 다른 모듈이 require되기 전에 초기화돼야 자동으로 에러를 잡을 수 있어서
+// 반드시 이 파일의 다른 어떤 require보다도 먼저 와야 함. SENTRY_DSN이 없으면 내부적으로 아무 것도 안 함.
+require('./instrument');
+
 // 서버가 어느 나라 클라우드에서 돌든(보통 UTC) 항상 한국 시간 기준으로 날짜/시간을 계산하게 고정함.
 // 이게 없으면 setHours() 같은 "로컬 시간" 함수들이 UTC 기준으로 동작해서,
 // 예약가능/매칭 계산에서 시간이 최대 9시간씩 어긋나는 버그가 생김.
@@ -8,6 +12,7 @@ const path = require('path');
 const http = require('http');
 const express = require('express');
 const cors = require('cors');
+const helmet = require('helmet');
 const jwt = require('jsonwebtoken');
 const { Server } = require('socket.io');
 
@@ -28,9 +33,24 @@ const { setIo } = require('./lib/socket');
 const app = express();
 const httpServer = http.createServer(app);
 
+// CORS 허용 출처 - 원래는 cors()가 모든 출처를 다 허용해서(전면 개방) 아무 사이트에서나
+// 이 API를 호출할 수 있었음(2026-09-30 보안 감사 Medium 6번). 프로덕션 프론트 도메인만 허용하도록 제한.
+// FRONTEND_URL 환경변수가 있으면 그 값을, 없으면 실제 배포된 프론트 주소를 기본값으로 씀.
+const PROD_FRONTEND_ORIGIN = process.env.FRONTEND_URL || 'https://catchme-29rt.onrender.com';
+function isAllowedOrigin(origin) {
+  if (!origin) return true; // 서버 간 호출, curl, 모바일 앱 등 Origin 헤더 자체가 없는 요청
+  if (origin === PROD_FRONTEND_ORIGIN) return true;
+  if (/^https?:\/\/(localhost|127\.0\.0\.1)(:\d+)?$/.test(origin)) return true; // 로컬 개발 중 테스트용
+  return false;
+}
+const corsOriginCheck = (origin, callback) => {
+  if (isAllowedOrigin(origin)) return callback(null, true);
+  return callback(new Error('CORS: 허용되지 않은 출처입니다.'));
+};
+
 // 실시간 메시지 전송용 소켓 서버. 프론트엔드가 REST API랑 같은 주소로 접속함.
 const io = new Server(httpServer, {
-  cors: { origin: '*' },
+  cors: { origin: corsOriginCheck },
 });
 
 // 소켓 연결 시 로그인 토큰(JWT)으로 신원 확인 -> 이 사람 전용 방("user:유저id")에 넣어둠.
@@ -53,7 +73,9 @@ io.on('connection', (socket) => {
 
 setIo(io);
 
-app.use(cors());
+// 보안 헤더 - X-Content-Type-Options, X-Frame-Options, CSP 등을 기본값으로 자동 설정 (2026-09-30 보안 감사 Medium 6번)
+app.use(helmet());
+app.use(cors({ origin: corsOriginCheck }));
 // 기본 body 크기 제한(100kb)은 리뷰/채팅 사진(base64, 장당 최대 약 500~700KB, 리뷰는 최대 5장)을 못 담아서
 // 사진 있는 요청이 "PayloadTooLargeError"로 튕기고 프론트에는 "서버에서 예상치 못한 오류가 발생했어요"로만 보였음.
 // 특히 폰 카메라로 찍은 사진은 디테일이 많아 같은 해상도로 압축해도 컴퓨터 사진보다 용량이 커서 이 한도를 더 잘 넘었음.

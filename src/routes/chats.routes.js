@@ -1,5 +1,6 @@
 const express = require('express');
 const { requireAuth } = require('../middleware/auth.middleware');
+const { imageUploadLimiter } = require('../middleware/rateLimit.middleware');
 const {
   listChatRooms,
   getOrCreateDirectRoom,
@@ -38,7 +39,7 @@ router.post('/direct', getOrCreateDirectRoom);
 router.post('/group', createGroupRoom);
 router.get('/:roomId/messages', listMessages);
 router.post('/:roomId/messages', sendTextMessage);
-router.post('/:roomId/images', sendImageMessage);
+router.post('/:roomId/images', imageUploadLimiter, sendImageMessage);
 router.post('/:roomId/reservations', sendReservationRequest);
 router.post('/:roomId/time-proposals', sendTimeProposal);
 router.post('/:roomId/location-suggestions', sendLocationSuggest);

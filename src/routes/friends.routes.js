@@ -1,5 +1,6 @@
 const express = require('express');
 const { requireAuth } = require('../middleware/auth.middleware');
+const { writeLimiter } = require('../middleware/rateLimit.middleware');
 const {
   searchUsers,
   listFriends,
@@ -30,7 +31,7 @@ router.get('/search', searchUsers);
 router.get('/nearby', nearbyFriends); // '/'보다 먼저 등록
 router.get('/', listFriends);
 router.get('/requests', listRequests);
-router.post('/requests', sendRequest);
+router.post('/requests', writeLimiter, sendRequest);
 router.post('/requests/:requestId/accept', acceptRequest);
 router.post('/requests/:requestId/decline', declineRequest);
 router.delete('/requests/:requestId', cancelRequest);

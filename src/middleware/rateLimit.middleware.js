@@ -27,4 +27,52 @@ const passwordResetLimiter = rateLimit({
   message: { message: '요청이 너무 많아요. 나중에 다시 시도해주세요.' },
 });
 
-module.exports = { loginLimiter, signupLimiter, passwordResetLimiter };
+// 게시물/댓글/친구요청 등 컨텐츠 작성 - 도배(스팸) 방지. IP 하나당 10분에 20번까지만
+// (2026-09-30 보안 감사 High 3번 - 이런 쓰기성 엔드포인트에 전용 rate limit이 전혀 없었음)
+const writeLimiter = rateLimit({
+  windowMs: 10 * 60 * 1000,
+  limit: 20,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { message: '너무 자주 시도하고 있어요. 잠시 후 다시 시도해주세요.' },
+});
+
+// 채팅 이미지 업로드 - 일반 텍스트 채팅보다는 느슨하게(정상적인 대화에서도 사진을 여러 장 보낼 수 있어서),
+// 그래도 무제한은 아니게. IP 하나당 10분에 40번까지만
+const imageUploadLimiter = rateLimit({
+  windowMs: 10 * 60 * 1000,
+  limit: 40,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { message: '이미지를 너무 자주 보내고 있어요. 잠시 후 다시 시도해주세요.' },
+});
+
+// 신고 - 같은 사람을 반복 신고해서 신뢰도를 조작하는 것 방지 (2026-09-30 보안 감사 High 4번).
+// IP 하나당 10분에 10번까지만
+const reportLimiter = rateLimit({
+  windowMs: 10 * 60 * 1000,
+  limit: 10,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { message: '신고가 너무 잦아요. 잠시 후 다시 시도해주세요.' },
+});
+
+// 아이디 중복확인 - 인증/레이트리밋이 전혀 없어서 누구나 무제한으로 가입된 아이디를 스캔할 수 있었음
+// (2026-09-30 보안 감사 Low 9번). IP 하나당 1분에 20번까지만
+const usernameCheckLimiter = rateLimit({
+  windowMs: 60 * 1000,
+  limit: 20,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { message: '요청이 너무 많아요. 잠시 후 다시 시도해주세요.' },
+});
+
+module.exports = {
+  loginLimiter,
+  signupLimiter,
+  passwordResetLimiter,
+  writeLimiter,
+  imageUploadLimiter,
+  reportLimiter,
+  usernameCheckLimiter,
+};

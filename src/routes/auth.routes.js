@@ -1,6 +1,6 @@
 const express = require('express');
 const { requireAuth } = require('../middleware/auth.middleware');
-const { loginLimiter, signupLimiter, passwordResetLimiter } = require('../middleware/rateLimit.middleware');
+const { loginLimiter, signupLimiter, passwordResetLimiter, usernameCheckLimiter } = require('../middleware/rateLimit.middleware');
 const {
   signup, login, checkUsername, refresh, logout, getMe,
   kakaoLoginRedirect, kakaoCallback, naverLoginRedirect, naverCallback,
@@ -11,7 +11,7 @@ const router = express.Router();
 
 router.post('/signup', signupLimiter, signup);
 router.post('/login', loginLimiter, login);
-router.get('/check-username', checkUsername);
+router.get('/check-username', usernameCheckLimiter, checkUsername);
 router.post('/refresh', refresh);
 router.post('/logout', logout);
 router.get('/me', requireAuth, getMe);
