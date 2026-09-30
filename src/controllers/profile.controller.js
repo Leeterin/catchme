@@ -1,7 +1,7 @@
 const bcrypt = require('bcryptjs');
 const prisma = require('../lib/prisma');
 const { toPublicUser } = require('./auth.controller');
-const { USERNAME_RE } = require('../lib/validators');
+const { USERNAME_RE, isAllowedImageDataUrl } = require('../lib/validators');
 
 // 프로필 이미지는 외부 저장소 없이 DB에 base64 문자열로 바로 저장한다.
 // 원본을 그대로 넣으면 너무 커지므로, 프론트에서 작게 압축(리사이즈)한 걸 받는 걸 전제로 하고
@@ -35,8 +35,8 @@ async function updateProfile(req, res) {
     if (profileImageUrl === null || profileImageUrl === '') {
       data.profileImageUrl = null; // 사진 삭제(기본 아바타로)
     } else if (typeof profileImageUrl === 'string') {
-      if (!profileImageUrl.startsWith('data:image/')) {
-        return res.status(400).json({ message: '이미지 형식이 올바르지 않아요.' });
+      if (!isAllowedImageDataUrl(profileImageUrl)) {
+        return res.status(400).json({ message: '이미지 형식이 올바르지 않아요. (png/jpg/webp/gif만 가능)' });
       }
       if (profileImageUrl.length > MAX_IMAGE_CHARS) {
         return res.status(400).json({ message: '이미지 용량이 너무 커요. 더 작은 사진을 사용해주세요.' });
@@ -57,8 +57,8 @@ async function updateProfile(req, res) {
     if (reviewAvatarUrl === null || reviewAvatarUrl === '') {
       data.reviewAvatarUrl = null; // 삭제(기존 프로필 사진으로 대체됨)
     } else if (typeof reviewAvatarUrl === 'string') {
-      if (!reviewAvatarUrl.startsWith('data:image/')) {
-        return res.status(400).json({ message: '이미지 형식이 올바르지 않아요.' });
+      if (!isAllowedImageDataUrl(reviewAvatarUrl)) {
+        return res.status(400).json({ message: '이미지 형식이 올바르지 않아요. (png/jpg/webp/gif만 가능)' });
       }
       if (reviewAvatarUrl.length > MAX_IMAGE_CHARS) {
         return res.status(400).json({ message: '이미지 용량이 너무 커요. 더 작은 사진을 사용해주세요.' });

@@ -1,5 +1,6 @@
 const prisma = require('../lib/prisma');
 const { distanceKm } = require('../lib/geo');
+const { isAllowedImageDataUrl } = require('../lib/validators');
 
 const MAX_IMAGE_CHARS = 700000; // base64 문자열 기준 대략 500KB (프로필 사진과 동일한 기준)
 const MAX_PHOTOS = 5;
@@ -16,8 +17,8 @@ function validatePhotos(photos, { requireAtLeastOne } = {}) {
   if (requireAtLeastOne && photos.length < MIN_PHOTOS) return { valid: null, error: `사진을 최소 ${MIN_PHOTOS}장 올려주세요.` };
   if (photos.length > MAX_PHOTOS) return { valid: null, error: `사진은 최대 ${MAX_PHOTOS}장까지 첨부할 수 있어요.` };
   for (const p of photos) {
-    if (typeof p !== 'string' || !p.startsWith('data:image/')) {
-      return { valid: null, error: '사진 형식이 올바르지 않아요.' };
+    if (!isAllowedImageDataUrl(p)) {
+      return { valid: null, error: '사진 형식이 올바르지 않아요. (png/jpg/webp/gif만 가능)' };
     }
     if (p.length > MAX_IMAGE_CHARS) {
       return { valid: null, error: '사진 용량이 너무 커요. 더 작은 사진으로 시도해주세요.' };

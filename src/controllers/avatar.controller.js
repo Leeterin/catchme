@@ -1,9 +1,17 @@
 const prisma = require('../lib/prisma');
+const { ALLOWED_IMAGE_DATA_URL_RE } = require('../lib/validators');
 
 // base64 데이터 URL(data:image/...;base64,...)을 진짜 이미지 파일처럼 서빙하는 공용 로직 -
 // 브라우저가 한 번 받은 뒤 캐싱해두고 재사용해서, 목록을 열 때마다 사진을 통째로 다시 안 받아오게 함.
+//
+// 서빙 직전에도 업로드 때와 같은 화이트리스트(png/jpeg/webp/gif)로 다시 한 번 검사한다.
+// 업로드 검증이 뚫리거나(과거에 svg가 허용됐던 데이터가 이미 저장돼 있는 경우 등) DB에
+// 다른 값이 들어있더라도, 여기서 막으면 신뢰할 수 없는 MIME이 Content-Type으로 그대로
+// 반사되어 브라우저에서 실행되는 걸(저장형 XSS) 막을 수 있다.
 function serveBase64Image(dataUrl, res) {
   if (!dataUrl) return res.status(404).end();
+  if (!ALLOWED_IMAGE_DATA_URL_RE.test(dataUrl)) return res.status(404).end();
+
   const match = dataUrl.match(/^data:(image\/[a-zA-Z0-9.+-]+);base64,(.+)$/);
   if (!match) return res.status(404).end();
 
@@ -11,6 +19,8 @@ function serveBase64Image(dataUrl, res) {
   const buffer = Buffer.from(base64Data, 'base64');
 
   res.set('Content-Type', mimeType);
+  res.set('X-Content-Type-Options', 'nosniff');
+  res.set('Content-Disposition', 'inline');
   res.set('Cache-Control', 'public, max-age=604800, immutable'); // 1주일 동안 브라우저가 다시 안 물어보고 캐시 그대로 씀
   return res.send(buffer);
 }

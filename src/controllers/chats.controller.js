@@ -1,5 +1,6 @@
 const prisma = require('../lib/prisma');
 const { getIo } = require('../lib/socket');
+const { isAllowedImageDataUrl } = require('../lib/validators');
 
 const MEMBER_USER_SELECT = {
   id: true,
@@ -494,8 +495,8 @@ async function sendImageMessage(req, res) {
   const { roomId } = req.params;
   const { imageUrl } = req.body;
 
-  if (!imageUrl || typeof imageUrl !== 'string' || !imageUrl.startsWith('data:image/')) {
-    return res.status(400).json({ message: '이미지 형식이 올바르지 않아요.' });
+  if (!isAllowedImageDataUrl(imageUrl)) {
+    return res.status(400).json({ message: '이미지 형식이 올바르지 않아요. (png/jpg/webp/gif만 가능)' });
   }
   if (imageUrl.length > MAX_CHAT_IMAGE_CHARS) {
     return res.status(400).json({ message: '이미지 용량이 너무 커요. 더 작은 사진을 사용해주세요.' });
