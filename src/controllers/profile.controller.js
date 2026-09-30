@@ -1,7 +1,7 @@
 const bcrypt = require('bcryptjs');
 const prisma = require('../lib/prisma');
 const { toPublicUser } = require('./auth.controller');
-const { USERNAME_RE, isAllowedImageDataUrl } = require('../lib/validators');
+const { USERNAME_RE, PHONE_RE, isAllowedImageDataUrl } = require('../lib/validators');
 
 // 프로필 이미지는 외부 저장소 없이 DB에 base64 문자열로 바로 저장한다.
 // 원본을 그대로 넣으면 너무 커지므로, 프론트에서 작게 압축(리사이즈)한 걸 받는 걸 전제로 하고
@@ -13,9 +13,25 @@ async function updateProfile(req, res) {
   const { name, username, bio, phone, phonePublic, emailPublic, profileImageUrl, reviewNickname, reviewAvatarUrl } = req.body;
   const data = {};
 
-  if (typeof name === 'string' && name.trim()) data.name = name.trim();
-  if (typeof bio === 'string') data.bio = bio;
-  if (typeof phone === 'string') data.phone = phone;
+  if (typeof name === 'string' && name.trim()) {
+    const trimmedName = name.trim();
+    if (trimmedName.length > 20) {
+      return res.status(400).json({ message: '이름은 20자 이내로 입력해주세요.' });
+    }
+    data.name = trimmedName;
+  }
+  if (typeof bio === 'string') {
+    if (bio.length > 200) {
+      return res.status(400).json({ message: '소개글은 200자 이내로 입력해주세요.' });
+    }
+    data.bio = bio;
+  }
+  if (typeof phone === 'string') {
+    if (phone && !PHONE_RE.test(phone)) {
+      return res.status(400).json({ message: '올바른 휴대폰 번호 형식이 아니에요. (예: 010-1234-5678)' });
+    }
+    data.phone = phone;
+  }
   if (typeof phonePublic === 'boolean') data.phonePublic = phonePublic;
   if (typeof emailPublic === 'boolean') data.emailPublic = emailPublic;
 
