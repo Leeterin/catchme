@@ -36,15 +36,22 @@ const httpServer = http.createServer(app);
 // CORS 허용 출처 - 원래는 cors()가 모든 출처를 다 허용해서(전면 개방) 아무 사이트에서나
 // 이 API를 호출할 수 있었음(2026-09-30 보안 감사 Medium 6번). 프로덕션 프론트 도메인만 허용하도록 제한.
 // FRONTEND_URL 환경변수가 있으면 그 값을, 없으면 실제 배포된 프론트 주소를 기본값으로 씀.
-const PROD_FRONTEND_ORIGIN = process.env.FRONTEND_URL || 'https://catchme-29rt.onrender.com';
+// 끝에 슬래시(/)가 붙어있어도(FRONTEND_URL이 OAuth 리다이렉트용으로 이미 쓰이고 있어서
+// 그쪽 형식과 다를 수 있음) 비교에서 걸러지도록 항상 슬래시를 떼고 비교함 - 안 떼면 브라우저가
+// 보내는 실제 Origin 헤더(끝에 슬래시 없음)와 문자열이 달라져서 정상 프론트가 차단당할 수 있음.
+const stripTrailingSlash = (s) => (typeof s === 'string' ? s.replace(/\/+$/, '') : s);
+const PROD_FRONTEND_ORIGIN = stripTrailingSlash(process.env.FRONTEND_URL) || 'https://catchme-29rt.onrender.com';
 function isAllowedOrigin(origin) {
   if (!origin) return true; // 서버 간 호출, curl, 모바일 앱 등 Origin 헤더 자체가 없는 요청
-  if (origin === PROD_FRONTEND_ORIGIN) return true;
+  if (stripTrailingSlash(origin) === PROD_FRONTEND_ORIGIN) return true;
   if (/^https?:\/\/(localhost|127\.0\.0\.1)(:\d+)?$/.test(origin)) return true; // 로컬 개발 중 테스트용
   return false;
 }
 const corsOriginCheck = (origin, callback) => {
   if (isAllowedOrigin(origin)) return callback(null, true);
+  // 실제로 어떤 출처가 막혔는지 로그로 남겨서, 예상 못한 값(FRONTEND_URL 오타 등)으로
+  // 정상 프론트까지 막히는 경우를 Render 로그에서 바로 확인할 수 있게 함.
+  console.warn(`[CORS] 차단된 출처: ${origin} (허용된 값: ${PROD_FRONTEND_ORIGIN})`);
   return callback(new Error('CORS: 허용되지 않은 출처입니다.'));
 };
 
