@@ -1,7 +1,7 @@
 const prisma = require('../lib/prisma');
 
-// 매칭 계산에서 볼 하루 시간 범위 (프론트엔드 HOURS 배열과 정확히 동일하게 9시~23시, 15칸)
-const MATCH_HOURS = Array.from({ length: 24 }, (_, i) => i); // 2026-10-05: 예약 가능 시간을 24시간 전체(0~23시)로 확장
+// 친구 일정 보기에서 쓰는 하루 시간 칸 (0~23시)
+const MATCH_HOURS = Array.from({ length: 24 }, (_, i) => i);
 
 // "2026-07-29" + 시(hour) 을 "한국 시간 기준" 그 시각으로 정확히 변환.
 // new Date(dateStr) + setHours()는 서버가 어느 시간대로 돌아가는지에 따라 결과가 달라질 수 있어 위험하므로,
@@ -123,65 +123,67 @@ async function matchCalendar(req, res) {
     return `${y}-${pad(m)}-${pad(d)}`;
   }
 
-  function isBusyAt(userId, dateObj, hour) {
-    const dateKey = kstDateKeyFromDateObj(dateObj);
-    const slotStart = kstDate(dateKey, hour, 0);
-    const slotEnd = kstDate(dateKey, hour + 1, 0);
-    return eventsByUser[userId].some((ev) => {
-      if (ev.status !== 'BUSY') return false;
+  // 이 사람의 그 날짜 일정들을 "하루 중 몇 분" 구간으로 ([시작분, 끝분), 0~1440으로 자름)
+  function dayIntervals(userId, dateKey, status) {
+    const dayStart = kstDate(dateKey, 0, 0).getTime();
+    const out = [];
+    eventsByUser[userId].forEach((ev) => {
+      if (ev.status !== status) return;
+      let s;
+      let e;
       if (ev.recurringWeekdays && ev.recurringWeekdays.length > 0) {
         // 반복 일정 - 이 날짜의 요일이 반복 패턴에 없거나, 예외 날짜거나, 반복 종료일을 지났으면 해당 없음
         const dow = kstDate(dateKey, 0, 0).getDay();
-        if (!ev.recurringWeekdays.includes(dow)) return false;
-        if (ev.recurringExceptions && ev.recurringExceptions.includes(dateKey)) return false;
-        if (ev.recurringUntil && kstDate(dateKey, 0, 0) > new Date(ev.recurringUntil)) return false;
-        // 시간(시:분)은 원래 저장된 그대로, 날짜만 지금 확인 중인 날로 다시 계산해서 비교
-        const occStart = kstDate(dateKey, ev.startTime.getHours(), ev.startTime.getMinutes());
-        const occEnd = kstDate(dateKey, ev.endTime.getHours(), ev.endTime.getMinutes());
-        return occStart < slotEnd && occEnd > slotStart;
+        if (!ev.recurringWeekdays.includes(dow)) return;
+        if (ev.recurringExceptions && ev.recurringExceptions.includes(dateKey)) return;
+        if (ev.recurringUntil && kstDate(dateKey, 0, 0) > new Date(ev.recurringUntil)) return;
+        // 시간(시:분)은 원래 저장된 그대로, 날짜만 지금 확인 중인 날로 다시 계산
+        s = kstDate(dateKey, ev.startTime.getHours(), ev.startTime.getMinutes()).getTime();
+        e = kstDate(dateKey, ev.endTime.getHours(), ev.endTime.getMinutes()).getTime();
+      } else {
+        s = new Date(ev.startTime).getTime();
+        e = new Date(ev.endTime).getTime();
       }
-      return new Date(ev.startTime) < slotEnd && new Date(ev.endTime) > slotStart;
+      const sm = Math.max(0, (s - dayStart) / 60000);
+      const em = Math.min(1440, (e - dayStart) / 60000);
+      if (em > sm) out.push([sm, em]);
     });
+    return out;
   }
 
-  // 이 시간이 "예약 가능"으로 명시적으로 표시돼있는지 확인 (매칭은 이제 그냥 비어있는 시간이 아니라,
-  // 서로 예약 가능으로 표시해둔 시간의 교집합만 인정함)
-  function isAvailableAt(userId, dateObj, hour) {
-    const dateKey = kstDateKeyFromDateObj(dateObj);
-    const slotStart = kstDate(dateKey, hour, 0);
-    const slotEnd = kstDate(dateKey, hour + 1, 0);
-    return eventsByUser[userId].some((ev) => {
-      if (ev.status !== 'AVAILABLE') return false;
-      if (ev.recurringWeekdays && ev.recurringWeekdays.length > 0) {
-        const dow = kstDate(dateKey, 0, 0).getDay();
-        if (!ev.recurringWeekdays.includes(dow)) return false;
-        if (ev.recurringExceptions && ev.recurringExceptions.includes(dateKey)) return false;
-        if (ev.recurringUntil && kstDate(dateKey, 0, 0) > new Date(ev.recurringUntil)) return false;
-        const occStart = kstDate(dateKey, ev.startTime.getHours(), ev.startTime.getMinutes());
-        const occEnd = kstDate(dateKey, ev.endTime.getHours(), ev.endTime.getMinutes());
-        return occStart < slotEnd && occEnd > slotStart;
-      }
-      return new Date(ev.startTime) < slotEnd && new Date(ev.endTime) > slotStart;
-    });
-  }
-
+  // 5분 칸마다: 전원이 "예약 가능"으로 그 5분을 빈틈없이 덮고, 아무도 바쁨 일정과 겹치지 않으면 매칭
+  // (예: 8:25까지만 예약 가능이면 매칭도 8:25에서 끝남)
+  const STEP = 5;
+  const SLOTS = 1440 / STEP;
   const days = [];
   const cursor = new Date(startDate);
   let safety = 0;
   while (cursor <= endDate && safety < 62) {
+    const dateKey = kstDateKeyFromDateObj(cursor);
+    const ok = new Array(SLOTS).fill(true);
+    allUserIds.forEach((id) => {
+      const avail = dayIntervals(id, dateKey, 'AVAILABLE');
+      const busy = dayIntervals(id, dateKey, 'BUSY');
+      for (let i = 0; i < SLOTS; i++) {
+        if (!ok[i]) continue;
+        const a = i * STEP;
+        const z = a + STEP;
+        if (!avail.some(([s, e]) => s <= a && e >= z) || busy.some(([s, e]) => s < z && e > a)) ok[i] = false;
+      }
+    });
     const ranges = [];
-    let rangeStartHour = null;
-    for (let i = 0; i <= MATCH_HOURS.length; i++) {
-      const hour = MATCH_HOURS[i];
-      const allMatch = i < MATCH_HOURS.length && allUserIds.every((id) => isAvailableAt(id, cursor, hour) && !isBusyAt(id, cursor, hour));
-      if (allMatch && rangeStartHour === null) {
-        rangeStartHour = hour;
-      } else if (!allMatch && rangeStartHour !== null) {
-        const endHour = MATCH_HOURS[i - 1] + 1;
-        if (endHour - rangeStartHour >= minHours) {
-          ranges.push({ startHour: rangeStartHour, endHour });
+    let runStart = null;
+    for (let i = 0; i <= SLOTS; i++) {
+      const hit = i < SLOTS && ok[i];
+      if (hit && runStart === null) runStart = i;
+      if (!hit && runStart !== null) {
+        const startMin = runStart * STEP;
+        const endMin = i * STEP;
+        if (endMin - startMin >= minHours * 60) {
+          // startHour/endHour는 예전 앱 호환용 (그 안에 온전히 들어가는 정각 범위)
+          ranges.push({ startMin, endMin, startHour: Math.ceil(startMin / 60), endHour: Math.floor(endMin / 60) });
         }
-        rangeStartHour = null;
+        runStart = null;
       }
     }
     if (ranges.length > 0) {
