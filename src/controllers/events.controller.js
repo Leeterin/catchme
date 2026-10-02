@@ -209,6 +209,7 @@ function serializeEvent(event) {
     recurringWeekdays: event.recurringWeekdays,
     recurringUntil: event.recurringUntil,
     recurringExceptions: event.recurringExceptions,
+    color: event.color || null,
     visibility: {
       groupIds: event.visibleGroupIds || [],
       private: event.visiblePrivate,
@@ -305,9 +306,17 @@ async function sanitizeGroupIds(ownerId, groupIds) {
   return [...new Set(groupIds)].filter((id) => ownedSet.has(id));
 }
 
-// POST /api/events   body: { title, startTime, endTime, status?, eventType?, visibility?:{groupIds,private}, recurringWeekdays?, recurringUntil? }
+// 일정 색상 입력 정리 - "#RRGGBB" 형식만 받고, 빈 값/null은 "색 지정 안 함"(테마 기본 색)으로 취급.
+// 그 외 이상한 값이면 undefined를 돌려줘서 기존 값을 건드리지 않음
+function sanitizeEventColor(color) {
+  if (color === null || color === '') return null;
+  if (typeof color === 'string' && /^#[0-9a-fA-F]{6}$/.test(color)) return color.toUpperCase();
+  return undefined;
+}
+
+// POST /api/events   body: { title, startTime, endTime, status?, eventType?, visibility?:{groupIds,private}, recurringWeekdays?, recurringUntil?, color? }
 async function createEvent(req, res) {
-  const { title, startTime, endTime, status, eventType, visibility, sourceChatRoomId, recurringWeekdays, recurringUntil } = req.body;
+  const { title, startTime, endTime, status, eventType, visibility, sourceChatRoomId, recurringWeekdays, recurringUntil, color } = req.body;
   const { valid, errors } = validateEventInput({ title, startTime, endTime, status });
   if (!valid) return res.status(400).json({ message: '입력값을 확인해주세요.', errors });
 
@@ -331,20 +340,21 @@ async function createEvent(req, res) {
       sourceChatRoomId: typeof sourceChatRoomId === 'string' ? sourceChatRoomId : null,
       recurringWeekdays: weekdays,
       recurringUntil: weekdays.length > 0 && recurringUntil ? new Date(recurringUntil) : null,
+      color: sanitizeEventColor(color) || null,
     },
   });
 
   return res.status(201).json({ event: serializeEvent(event) });
 }
 
-// PATCH /api/events/:id   body: { title?, startTime?, endTime?, status?, recurringWeekdays?, recurringUntil?, recurringExceptions? }
+// PATCH /api/events/:id   body: { title?, startTime?, endTime?, status?, recurringWeekdays?, recurringUntil?, recurringExceptions?, color? }
 async function updateEvent(req, res) {
   const existing = await prisma.event.findUnique({ where: { id: req.params.id } });
   if (!existing || existing.userId !== req.userId) {
     return res.status(404).json({ message: '일정을 찾을 수 없어요.' });
   }
 
-  const { title, startTime, endTime, status, eventType, visibility, recurringWeekdays, recurringUntil, recurringExceptions } = req.body;
+  const { title, startTime, endTime, status, eventType, visibility, recurringWeekdays, recurringUntil, recurringExceptions, color } = req.body;
   const { valid, errors } = validateEventInput({ title, startTime, endTime, status }, { partial: true });
   if (!valid) return res.status(400).json({ message: '입력값을 확인해주세요.', errors });
 
@@ -382,6 +392,7 @@ async function updateEvent(req, res) {
       recurringWeekdays: weekdays,
       recurringUntil: recurringUntil !== undefined ? (recurringUntil ? new Date(recurringUntil) : null) : undefined,
       recurringExceptions: Array.isArray(recurringExceptions) ? recurringExceptions : undefined,
+      color: sanitizeEventColor(color),
     },
   });
 

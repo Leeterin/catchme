@@ -372,6 +372,10 @@ model Event {
   recurringUntil      DateTime?
   recurringExceptions String[]  @default([]) // "YYYY-MM-DD" 형식 - 이 날짜들은 반복에서 제외됨
 
+  // 내 캘린더(한달/일주일 보기)에서 이 일정 블록에 쓸 색 ("#RRGGBB"). null이면 테마 기본 색을 씀.
+  // 본인 화면 표시용이라 친구 캘린더 등 다른 유저 응답에는 내보내지 않음
+  color String?
+
   createdAt DateTime @default(now())
 
   @@index([userId, startTime, endTime])
