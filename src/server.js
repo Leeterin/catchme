@@ -64,18 +64,29 @@ const io = new Server(httpServer, {
 // 나중에 새 메시지가 생기면 io.to(`user:상대방id`).emit(...) 으로 그 사람에게만 실시간 전달.
 io.use((socket, next) => {
   const token = socket.handshake.auth && socket.handshake.auth.token;
-  if (!token) return next(new Error('unauthorized'));
+  if (!token) {
+    console.log('[socket][임시로그] 토큰 없음 - 인증 거부, transport=', socket.conn && socket.conn.transport && socket.conn.transport.name);
+    return next(new Error('unauthorized'));
+  }
   try {
     const payload = jwt.verify(token, process.env.JWT_SECRET);
     socket.userId = payload.sub;
     next();
   } catch (err) {
+    console.log('[socket][임시로그] 토큰 인증 실패:', err.message);
     next(new Error('unauthorized'));
   }
 });
 
 io.on('connection', (socket) => {
   socket.join(`user:${socket.userId}`);
+  console.log(`[socket][임시로그] 연결됨 userId=${socket.userId} socketId=${socket.id} transport=${socket.conn.transport.name}`);
+  socket.conn.on('upgrade', () => {
+    console.log(`[socket][임시로그] transport 업그레이드됨 userId=${socket.userId} -> ${socket.conn.transport.name}`);
+  });
+  socket.on('disconnect', (reason) => {
+    console.log(`[socket][임시로그] 연결 끊김 userId=${socket.userId} reason=${reason}`);
+  });
 });
 
 setIo(io);

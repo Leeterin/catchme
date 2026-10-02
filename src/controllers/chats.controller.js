@@ -21,8 +21,16 @@ async function getOtherMemberIds(chatRoomId, userId) {
 // 이 채팅방의 나머지 멤버들에게 실시간으로 이벤트를 보냄 (연결 안 돼있으면 그냥 무시됨)
 async function notifyRoom(chatRoomId, senderId, event, payload) {
   const io = getIo();
-  if (!io) return;
+  if (!io) {
+    console.log('[notifyRoom][임시로그] io 인스턴스가 없음 - 전송 자체가 불가능한 상태');
+    return;
+  }
   const otherIds = await getOtherMemberIds(chatRoomId, senderId);
+  const roomSizes = otherIds.map((userId) => {
+    const r = io.sockets.adapter.rooms.get(`user:${userId}`);
+    return { userId, socketsInRoom: r ? r.size : 0 };
+  });
+  console.log(`[notifyRoom][임시로그] chatRoomId=${chatRoomId} event=${event} 보낼대상=${JSON.stringify(roomSizes)}`);
   otherIds.forEach((userId) => {
     io.to(`user:${userId}`).emit(event, payload);
   });
