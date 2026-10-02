@@ -163,6 +163,9 @@ async function deleteUser(req, res) {
 // 신고 처리
 // ------------------------------------------------------------
 async function resolveTargetPreview(report) {
+  if (report.targetType === 'BUG') {
+    return { exists: true, title: report.reason };
+  }
   try {
     if (report.targetType === 'FEED_POST') {
       const post = await prisma.feedPost.findUnique({
@@ -233,6 +236,13 @@ async function resolveReport(req, res) {
 
   const report = await prisma.report.findUnique({ where: { id } });
   if (!report) return res.status(404).json({ message: '신고를 찾을 수 없어요.' });
+
+  // 앱 오류 신고는 지울 콘텐츠/정지할 유저가 없어서 "확인 완료"로만 처리함
+  if (action === 'MARK_REVIEWED') {
+    await prisma.report.update({ where: { id }, data: { status: 'REVIEWED' } });
+    await logAdminAction(req.userId, 'RESOLVE_REPORT', { targetType: 'REPORT', targetId: id, detail: '확인 완료' });
+    return res.json({ message: '확인 완료로 처리했어요.' });
+  }
 
   if (action === 'DISMISS') {
     await prisma.report.update({ where: { id }, data: { status: 'DISMISSED' } });
@@ -664,7 +674,9 @@ async function getReportDetail(req, res) {
   if (!report) return res.status(404).json({ message: '신고를 찾을 수 없어요.' });
 
   let target = { exists: false };
-  if (report.targetType === 'FEED_POST') {
+  if (report.targetType === 'BUG') {
+    target = { exists: true, type: 'BUG' };
+  } else if (report.targetType === 'FEED_POST') {
     const post = await prisma.feedPost.findUnique({
       where: { id: report.targetId },
       select: {

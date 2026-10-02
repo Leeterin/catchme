@@ -497,7 +497,7 @@
 
   // ---------- 신고 처리 ----------
   let reportPage = 1;
-  const TARGET_TYPE_LABEL = { FEED_POST: '소식 게시물', MEETUP: '모임', USER: '유저' };
+  const TARGET_TYPE_LABEL = { FEED_POST: '소식 게시물', MEETUP: '모임', USER: '유저', BUG: '앱 오류' };
   const REPORT_STATUS_LABEL = { PENDING: '대기중', REVIEWED: '처리됨', DISMISSED: '반려됨' };
 
   async function loadReports(page){
@@ -517,7 +517,7 @@
                 [${TARGET_TYPE_LABEL[r.targetType] || r.targetType}] ${escapeHtml(r.target.exists ? r.target.title : '(이미 삭제된 콘텐츠)')}
                 ${r.status === 'PENDING' ? '<span class="badge pending">대기중</span>' : ''}
               </div>
-              <div class="row-sub">사유: ${escapeHtml(r.reason)}${r.detail ? ` — ${escapeHtml(r.detail)}` : ''}</div>
+              <div class="row-sub">사유: ${escapeHtml(r.reason)}${r.detail ? ` — ${escapeHtml(r.targetType === 'BUG' ? r.detail.split('\n')[0].slice(0, 80) : r.detail)}` : ''}</div>
               <div class="row-sub">
                 신고자 @${escapeHtml(r.reporter.username)}
                 ${r.target.author ? ` · 대상 @${escapeHtml(r.target.author.username)}` : ''}
@@ -528,7 +528,9 @@
               <button data-action="detail">상세보기</button>
               ${r.status === 'PENDING' ? `
                 <button data-action="dismiss">반려</button>
-                ${r.targetType === 'USER'
+                ${r.targetType === 'BUG'
+                  ? `<button data-action="mark-reviewed">확인 완료</button>`
+                  : r.targetType === 'USER'
                   ? `<button class="danger" data-action="suspend-user">유저 정지</button>`
                   : `<button class="danger" data-action="delete-content">콘텐츠 삭제</button>`}
               ` : ''}
@@ -567,6 +569,9 @@
             <div class="detail-row-sub">개설자 @${escapeHtml(t.creator.username)} · 참여 ${t.participantCount}명 · ${fmtDate(t.createdAt)}</div>
             ${t.description ? `<div class="detail-row-sub">${escapeHtml(t.description)}</div>` : ''}
           `;
+        } else if(t.type === 'BUG'){
+          // 오류 신고는 설명 + 기기 정보 + 최근 오류 로그가 여러 줄로 들어있어서 줄바꿈 그대로 보여줌
+          targetHtml = `<div class="detail-row-sub" style="white-space:pre-wrap;word-break:break-all;">${escapeHtml(data.detail || '')}</div>`;
         } else if(t.type === 'USER'){
           targetHtml = `
             <div class="detail-row-title">
@@ -585,9 +590,9 @@
             · 상태 ${escapeHtml(REPORT_STATUS_LABEL[data.status] || data.status)}
           </div>
           <div class="detail-row-sub">사유: ${escapeHtml(data.reason)}</div>
-          ${data.detail ? `<div class="detail-row-sub">상세 설명: ${escapeHtml(data.detail)}</div>` : ''}
+          ${data.detail && data.targetType !== 'BUG' ? `<div class="detail-row-sub">상세 설명: ${escapeHtml(data.detail)}</div>` : ''}
         </div>
-        <div class="detail-subheading">신고 대상</div>
+        <div class="detail-subheading">${data.targetType === 'BUG' ? '오류 내용' : '신고 대상'}</div>
         <div class="detail-section">${targetHtml}</div>
       `;
     } catch(err) {
@@ -602,6 +607,14 @@
       const dismissBtn = row.querySelector('[data-action="dismiss"]');
       const suspendBtn = row.querySelector('[data-action="suspend-user"]');
       const deleteBtn = row.querySelector('[data-action="delete-content"]');
+      const reviewedBtn = row.querySelector('[data-action="mark-reviewed"]');
+      if(reviewedBtn) reviewedBtn.addEventListener('click', async () => {
+        try {
+          await apiRequest(`/admin/reports/${id}/resolve`, { method: 'POST', body: JSON.stringify({ action: 'MARK_REVIEWED' }) });
+          showToast('확인 완료로 처리했어요.');
+          loadReports(reportPage);
+        } catch(err) { showToast(err.message); }
+      });
       if(detailBtn) detailBtn.addEventListener('click', () => showReportDetail(id));
       if(dismissBtn) dismissBtn.addEventListener('click', async () => {
         const result = await confirmModal('신고 반려', '이 신고를 반려 처리할까요?', { confirmLabel: '반려하기', danger: false });
