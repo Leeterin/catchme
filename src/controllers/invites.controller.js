@@ -37,12 +37,98 @@ function todayKstStr() {
   return now.toISOString().slice(0, 10);
 }
 
-function validCellSet(poll) {
+function validCellSet(poll, openCells) {
   const set = new Set();
   poll.dates.forEach((d) => {
     for (let h = poll.startHour; h < poll.endHour; h++) set.add(`${d}|${pad2(h)}`);
   });
-  return set;
+  if (!openCells) return set;
+  return new Set([...set].filter((c) => openCells.has(c)));
+}
+
+function addDaysStr(dateStr, n) {
+  return new Date(new Date(`${dateStr}T00:00:00Z`).getTime() + n * 86400000).toISOString().slice(0, 10);
+}
+
+// 한국 시간 기준 그 시각의 "하루 중 몇 분"
+function kstMinuteOfDay(d) {
+  const k = new Date(d.getTime() + 9 * 3600000);
+  return k.getUTCHours() * 60 + k.getUTCMinutes();
+}
+
+// 이 사람 캘린더에서 "예약 가능"으로 등록된 1시간 칸들 ("YYYY-MM-DD|HH" Set)
+// - 예약 가능 일정이 그 1시간을 빈틈없이 덮어야 하고, 바쁨(약속/예약중) 일정과 겹치면 뺌
+// - 이미 지난 시간도 뺌
+async function availableCellsFor(userId, dates, startHour = 0, endHour = 24) {
+  const cells = new Set();
+  if (!dates.length) return cells;
+  const sorted = [...dates].sort();
+  const rangeStart = kstDate(sorted[0], 0);
+  const rangeEnd = kstDate(sorted[sorted.length - 1], 24);
+  const events = await prisma.event.findMany({
+    where: {
+      userId,
+      status: { in: ['BUSY', 'AVAILABLE'] },
+      OR: [
+        { recurringWeekdays: { isEmpty: true }, startTime: { lt: rangeEnd }, endTime: { gt: rangeStart } },
+        {
+          recurringWeekdays: { isEmpty: false },
+          startTime: { lt: rangeEnd },
+          OR: [{ recurringUntil: null }, { recurringUntil: { gte: rangeStart } }],
+        },
+      ],
+    },
+    select: { startTime: true, endTime: true, status: true, recurringWeekdays: true, recurringUntil: true, recurringExceptions: true },
+  });
+
+  const now = Date.now();
+  sorted.forEach((date) => {
+    const dayStart = kstDate(date, 0);
+    const dayEnd = kstDate(date, 24);
+    const dow = new Date(`${date}T00:00:00Z`).getUTCDay();
+    const avail = [];
+    const busy = [];
+    events.forEach((ev) => {
+      let s = ev.startTime.getTime();
+      let e = ev.endTime.getTime();
+      if (ev.recurringWeekdays.length > 0) {
+        // 반복 일정 - 이 날짜에 해당하면 시:분은 그대로 두고 날짜만 이 날로 옮김
+        if (!ev.recurringWeekdays.includes(dow)) return;
+        if (ev.recurringExceptions.includes(date)) return;
+        if (ev.recurringUntil && dayStart > new Date(ev.recurringUntil)) return;
+        if (ev.startTime >= dayEnd) return; // 아직 반복이 시작되기 전 날짜
+        const dur = e - s;
+        s = dayStart.getTime() + kstMinuteOfDay(ev.startTime) * 60000;
+        e = s + dur;
+      }
+      if (s >= dayEnd.getTime() || e <= dayStart.getTime()) return;
+      (ev.status === 'AVAILABLE' ? avail : busy).push([s, e]);
+    });
+    if (!avail.length) return;
+    avail.sort((a, b) => a[0] - b[0]);
+    // 붙어있는 예약 가능 조각은 하나로 합침 (14~15시 + 15~16시 = 14~16시)
+    const merged = [];
+    avail.forEach(([s, e]) => {
+      const last = merged[merged.length - 1];
+      if (last && s <= last[1]) last[1] = Math.max(last[1], e);
+      else merged.push([s, e]);
+    });
+    for (let h = startHour; h < endHour; h++) {
+      const cs = dayStart.getTime() + h * 3600000;
+      const ce = cs + 3600000;
+      if (cs < now) continue;
+      if (!merged.some(([s, e]) => s <= cs && e >= ce)) continue;
+      if (busy.some(([s, e]) => s < ce && e > cs)) continue;
+      cells.add(`${date}|${pad2(h)}`);
+    }
+  });
+  return cells;
+}
+
+// 캘린더 기준 링크면 지금 열려있는 칸들, 아니면 null(범위 안 전부 가능)
+async function openCellsForPoll(poll) {
+  if (!poll.fromCalendar || poll.status !== 'OPEN') return null;
+  return availableCellsFor(poll.creatorId, poll.dates, poll.startHour, poll.endHour);
 }
 
 // 비회원은 브라우저에 저장해둔 guestKey로 자기 응답을 찾음. 회원은 userId로도 찾음
@@ -56,7 +142,7 @@ function findMyResponse(poll, { userId, guestKey }) {
   return null;
 }
 
-function serializePoll(poll, { userId, guestKey } = {}) {
+function serializePoll(poll, { userId, guestKey, openCells } = {}) {
   const mine = findMyResponse(poll, { userId, guestKey });
   return {
     token: poll.token,
@@ -65,6 +151,9 @@ function serializePoll(poll, { userId, guestKey } = {}) {
     dates: poll.dates,
     startHour: poll.startHour,
     endHour: poll.endHour,
+    fromCalendar: poll.fromCalendar,
+    // 캘린더 기준 링크: 지금 고를 수 있는 칸 (만든 사람의 예약 가능 시간). null이면 범위 안 전부
+    openCells: openCells ? [...openCells].sort() : null,
     status: poll.status,
     confirmedStart: poll.confirmedStart,
     confirmedEnd: poll.confirmedEnd,
@@ -117,16 +206,48 @@ async function addConfirmedEvent(db, poll, userId) {
   });
 }
 
-// POST /api/invites  { title, dates: ["YYYY-MM-DD"], startHour, endHour }
+// GET /api/invites/availability - 링크 만들기 화면 미리보기용, 오늘부터 3주 동안 내 예약 가능 칸
+async function myAvailability(req, res) {
+  try {
+    const today = todayKstStr();
+    const dates = [];
+    for (let i = 0; i < 21; i++) dates.push(addDaysStr(today, i));
+    const cells = await availableCellsFor(req.userId, dates);
+    const byDate = {};
+    [...cells].sort().forEach((c) => {
+      const [d, h] = c.split('|');
+      (byDate[d] = byDate[d] || []).push(Number(h));
+    });
+    res.json({ days: Object.keys(byDate).sort().map((date) => ({ date, hours: byDate[date] })) });
+  } catch (err) {
+    console.error('[myAvailability]', err);
+    res.status(500).json({ message: '예약 가능 시간을 불러오지 못했어요.' });
+  }
+}
+
+// POST /api/invites  { title, dates: ["YYYY-MM-DD"], startHour, endHour, fromCalendar }
+// fromCalendar면 startHour/endHour는 무시하고, 고른 날짜들의 내 예약 가능 시간으로 범위를 정함
 async function createInvite(req, res) {
   try {
     const title = String(req.body.title || '').trim().slice(0, MAX_TITLE);
     const rawDates = Array.isArray(req.body.dates) ? req.body.dates : [];
-    const startHour = parseInt(req.body.startHour, 10);
-    const endHour = parseInt(req.body.endHour, 10);
+    const fromCalendar = req.body.fromCalendar === true;
+    let startHour = parseInt(req.body.startHour, 10);
+    let endHour = parseInt(req.body.endHour, 10);
 
     if (!title) return res.status(400).json({ message: '약속 이름을 적어주세요.' });
-    const dates = [...new Set(rawDates.filter(isValidDateStr))].sort();
+    let dates = [...new Set(rawDates.filter(isValidDateStr))].sort();
+    if (fromCalendar && dates.length > 0 && dates.length <= MAX_DATES) {
+      const cells = [...await availableCellsFor(req.userId, dates)];
+      if (cells.length === 0) {
+        return res.status(400).json({ message: '고른 날짜에 예약 가능한 시간이 없어요. 캘린더에서 먼저 등록해주세요.' });
+      }
+      const hours = cells.map((c) => Number(c.split('|')[1]));
+      startHour = Math.min(...hours);
+      endHour = Math.max(...hours) + 1;
+      const withCells = new Set(cells.map((c) => c.split('|')[0]));
+      dates = dates.filter((d) => withCells.has(d));
+    }
     if (dates.length === 0) return res.status(400).json({ message: '날짜를 하나 이상 골라주세요.' });
     if (dates.length > MAX_DATES) return res.status(400).json({ message: `날짜는 최대 ${MAX_DATES}개까지 고를 수 있어요.` });
     if (dates[0] < todayKstStr()) return res.status(400).json({ message: '지난 날짜는 고를 수 없어요.' });
@@ -142,10 +263,11 @@ async function createInvite(req, res) {
         dates,
         startHour,
         endHour,
+        fromCalendar,
       },
       include: POLL_INCLUDE,
     });
-    res.status(201).json({ invite: serializePoll(poll, { userId: req.userId }) });
+    res.status(201).json({ invite: serializePoll(poll, { userId: req.userId, openCells: await openCellsForPoll(poll) }) });
   } catch (err) {
     console.error('[createInvite]', err);
     res.status(500).json({ message: '초대 링크를 만들지 못했어요.' });
@@ -174,7 +296,7 @@ async function getInvite(req, res) {
     const poll = await findPollByToken(req.params.token);
     if (!poll) return res.status(404).json({ message: '초대 링크를 찾을 수 없어요.' });
     const guestKey = typeof req.query.guestKey === 'string' ? req.query.guestKey.slice(0, 64) : null;
-    res.json({ invite: serializePoll(poll, { userId: req.userId, guestKey }) });
+    res.json({ invite: serializePoll(poll, { userId: req.userId, guestKey, openCells: await openCellsForPoll(poll) }) });
   } catch (err) {
     console.error('[getInvite]', err);
     res.status(500).json({ message: '초대 정보를 불러오지 못했어요.' });
@@ -198,9 +320,12 @@ async function respondInvite(req, res) {
     const name = String(req.body.name || '').trim().slice(0, MAX_NAME);
     if (!name) return res.status(400).json({ message: '이름을 적어주세요.' });
 
-    const valid = validCellSet(poll);
+    const openCells = await openCellsForPoll(poll);
+    const valid = validCellSet(poll, openCells);
     const cells = [...new Set(Array.isArray(req.body.cells) ? req.body.cells : [])].filter((c) => valid.has(c)).sort();
-    if (cells.length === 0) return res.status(400).json({ message: '가능한 시간을 하나 이상 골라주세요.' });
+    if (cells.length === 0) {
+      return res.status(400).json({ message: openCells ? '고른 시간이 이제 안 돼요. 다시 골라주세요.' : '가능한 시간을 하나 이상 골라주세요.' });
+    }
 
     const existing = findMyResponse(poll, { userId: req.userId, guestKey });
     if (!existing && poll.responses.length >= MAX_RESPONSES) {
@@ -225,7 +350,7 @@ async function respondInvite(req, res) {
       name,
       kind: existing ? 'edited' : 'responded',
     });
-    res.json({ invite: serializePoll(updated, { userId: req.userId, guestKey }) });
+    res.json({ invite: serializePoll(updated, { userId: req.userId, guestKey, openCells }) });
   } catch (err) {
     console.error('[respondInvite]', err);
     res.status(500).json({ message: '응답을 저장하지 못했어요.' });
@@ -312,7 +437,7 @@ async function claimInvite(req, res) {
       addedToCalendar = true;
     }
     const updated = await findPollByToken(poll.token);
-    res.json({ invite: serializePoll(updated, { userId: req.userId, guestKey }), addedToCalendar });
+    res.json({ invite: serializePoll(updated, { userId: req.userId, guestKey, openCells: await openCellsForPoll(updated) }), addedToCalendar });
   } catch (err) {
     console.error('[claimInvite]', err);
     res.status(500).json({ message: '약속을 내 계정에 연결하지 못했어요.' });
@@ -320,6 +445,7 @@ async function claimInvite(req, res) {
 }
 
 module.exports = {
+  myAvailability,
   createInvite,
   listMyInvites,
   getInvite,
