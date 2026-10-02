@@ -6,7 +6,7 @@ const {
   getDailyStats,
   listUsers, getUserDetail, suspendUser, unsuspendUser, deleteUser,
   listReports, getReportDetail, resolveReport,
-  listFeedPosts, deleteFeedPost,
+  listFeedPosts, getFeedPostDetail, deleteFeedPost,
   listMeetups, cancelMeetup,
   listAdminLogs,
 } = require('../controllers/admin.controller');
@@ -31,6 +31,7 @@ router.get('/reports/:id', getReportDetail);
 router.post('/reports/:id/resolve', resolveReport);
 
 router.get('/feed-posts', listFeedPosts);
+router.get('/feed-posts/:id', getFeedPostDetail);
 router.delete('/feed-posts/:id', deleteFeedPost);
 
 router.get('/meetups', listMeetups);

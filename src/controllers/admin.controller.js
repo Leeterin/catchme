@@ -321,6 +321,74 @@ async function listFeedPosts(req, res) {
   });
 }
 
+// ------------------------------------------------------------
+// 소식 게시물 상세보기 - 목록에서는 요약만 보이던 게시물을 사진/댓글까지 자세히 보여줌
+// ------------------------------------------------------------
+// GET /api/admin/feed-posts/:id
+async function getFeedPostDetail(req, res) {
+  const { id } = req.params;
+
+  const post = await prisma.feedPost.findUnique({
+    where: { id },
+    include: {
+      author: { select: { id: true, username: true, name: true, email: true } },
+      _count: { select: { likes: true, comments: true } },
+    },
+  });
+  if (!post) return res.status(404).json({ message: '게시물을 찾을 수 없어요.' });
+
+  const [comments, reportsCount, reports] = await Promise.all([
+    prisma.feedPostComment.findMany({
+      where: { postId: id },
+      orderBy: { createdAt: 'desc' },
+      take: 20,
+      include: { author: { select: { id: true, username: true, name: true } } },
+    }),
+    prisma.report.count({ where: { targetType: 'FEED_POST', targetId: id } }),
+    prisma.report.findMany({
+      where: { targetType: 'FEED_POST', targetId: id },
+      orderBy: { createdAt: 'desc' },
+      take: 5,
+      include: { reporter: { select: { username: true } } },
+    }),
+  ]);
+
+  return res.json({
+    post: {
+      id: post.id,
+      category: post.category,
+      title: post.title,
+      note: post.note,
+      location: post.location,
+      address: post.address,
+      phone: post.phone,
+      lat: post.lat,
+      lon: post.lon,
+      rating: post.rating,
+      photos: post.photos || [],
+      createdAt: post.createdAt,
+      author: post.author,
+      likeCount: post._count.likes,
+      commentCount: post._count.comments,
+      reportsCount,
+    },
+    comments: comments.map((c) => ({
+      id: c.id,
+      text: c.text,
+      rating: c.rating,
+      createdAt: c.createdAt,
+      author: c.author,
+    })),
+    reports: reports.map((r) => ({
+      id: r.id,
+      reason: r.reason,
+      status: r.status,
+      createdAt: r.createdAt,
+      reporterUsername: r.reporter.username,
+    })),
+  });
+}
+
 // DELETE /api/admin/feed-posts/:id
 async function deleteFeedPost(req, res) {
   const { id } = req.params;
@@ -674,7 +742,7 @@ module.exports = {
   getDailyStats,
   listUsers, getUserDetail, suspendUser, unsuspendUser, deleteUser,
   listReports, getReportDetail, resolveReport,
-  listFeedPosts, deleteFeedPost,
+  listFeedPosts, getFeedPostDetail, deleteFeedPost,
   listMeetups, cancelMeetup,
   listAdminLogs,
 };

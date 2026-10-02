@@ -658,27 +658,75 @@
               </div>
             </div>
             <div class="row-actions">
+              <button data-action="detail">상세보기</button>
               <button class="danger" data-action="delete">삭제</button>
             </div>
           </div>
         `).join('');
-        listEl.querySelectorAll('.row').forEach((row) => {
-          const id = row.dataset.id;
-          row.querySelector('[data-action="delete"]').addEventListener('click', async () => {
-            const result = await confirmModal('게시물 삭제', '이 소식 게시물을 삭제할까요?\n되돌릴 수 없어요.', { confirmLabel: '삭제하기', danger: true });
-            if(!result.confirmed) return;
-            try {
-              await apiRequest(`/admin/feed-posts/${id}`, { method: 'DELETE' });
-              showToast('게시물을 삭제했어요.');
-              loadFeed(feedPage);
-            } catch(err) { showToast(err.message); }
-          });
-        });
+        wireFeedRowActions(listEl);
       }
       renderPagination('feedPagination', data.page, data.totalPages, loadFeed);
     } catch(err) {
       listEl.innerHTML = `<div class="empty-state">${escapeHtml(err.message)}</div>`;
     }
+  }
+
+  async function showFeedPostDetail(id){
+    openDetailModal('소식 게시물 상세');
+    const body = document.getElementById('detailModalBody');
+    try {
+      const data = await apiRequest(`/admin/feed-posts/${id}`);
+      const p = data.post;
+      body.innerHTML = `
+        <div class="detail-section">
+          <div class="detail-row-title">[${escapeHtml(p.category || '-')}] ${escapeHtml(p.title || '(제목 없음)')}${typeof p.rating === 'number' ? ` · ⭐${p.rating}` : ''}</div>
+          <div class="detail-row-sub">
+            작성자 @${escapeHtml(p.author.username)} (${escapeHtml(p.author.email)}) · ${fmtDate(p.createdAt)}
+          </div>
+          ${p.location || p.address ? `<div class="detail-row-sub">${[p.location, p.address].filter(Boolean).map(escapeHtml).join(' · ')}</div>` : ''}
+          ${p.phone ? `<div class="detail-row-sub">전화 ${escapeHtml(p.phone)}</div>` : ''}
+          ${p.note ? `<div class="detail-row-sub">${escapeHtml(p.note)}</div>` : ''}
+        </div>
+        <div class="detail-stat-row">
+          <div class="detail-stat"><div class="n">${p.likeCount}</div><div class="l">좋아요</div></div>
+          <div class="detail-stat"><div class="n">${p.commentCount}</div><div class="l">댓글</div></div>
+          <div class="detail-stat"><div class="n">${p.photos.length}</div><div class="l">사진</div></div>
+          <div class="detail-stat"><div class="n" style="color:${p.reportsCount > 0 ? 'var(--danger)' : 'var(--text)'}">${p.reportsCount}</div><div class="l">신고받음</div></div>
+        </div>
+        ${p.photos.length ? `
+          <div class="detail-subheading">사진</div>
+          <div class="detail-photo-grid">
+            ${p.photos.map((src) => `<img src="${src}" loading="lazy" onclick="window.open(this.src, '_blank')" />`).join('')}
+          </div>
+        ` : ''}
+        <div class="detail-subheading">댓글 (최근 ${data.comments.length}개)</div>
+        ${data.comments.length ? data.comments.map((c) => `
+          <div class="detail-list-item">@${escapeHtml(c.author.username)}${typeof c.rating === 'number' ? ` · ⭐${c.rating}` : ''} · ${fmtDate(c.createdAt)}<br>${escapeHtml(c.text)}</div>
+        `).join('') : '<div class="detail-empty">댓글이 없어요.</div>'}
+        <div class="detail-subheading">받은 신고</div>
+        ${data.reports.length ? data.reports.map((r) => `
+          <div class="detail-list-item">${escapeHtml(r.reason)} · 신고자 @${escapeHtml(r.reporterUsername)} · ${fmtDate(r.createdAt)} ${r.status === 'PENDING' ? '<span class="badge pending">대기중</span>' : ''}</div>
+        `).join('') : '<div class="detail-empty">받은 신고가 없어요.</div>'}
+      `;
+    } catch(err) {
+      body.innerHTML = `<div class="empty-state">${escapeHtml(err.message)}</div>`;
+    }
+  }
+
+  function wireFeedRowActions(listEl){
+    listEl.querySelectorAll('.row').forEach((row) => {
+      const id = row.dataset.id;
+      row.querySelector('[data-action="detail"]').addEventListener('click', () => showFeedPostDetail(id));
+      row.querySelector('[data-action="delete"]').addEventListener('click', async () => {
+        const result = await confirmModal('게시물 삭제', '이 소식 게시물을 삭제할까요?\n되돌릴 수 없어요.', { confirmLabel: '삭제하기', danger: true });
+        if(!result.confirmed) return;
+        try {
+          await apiRequest(`/admin/feed-posts/${id}`, { method: 'DELETE' });
+          showToast('게시물을 삭제했어요.');
+          loadFeed(feedPage);
+        } catch(err) { showToast(err.message); }
+      });
+    });
   }
   document.getElementById('feedSearchBtn').addEventListener('click', () => loadFeed(1));
   document.getElementById('feedSearchInput').addEventListener('keydown', (e) => { if(e.key === 'Enter') loadFeed(1); });
