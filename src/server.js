@@ -41,9 +41,14 @@ const httpServer = http.createServer(app);
 // 보내는 실제 Origin 헤더(끝에 슬래시 없음)와 문자열이 달라져서 정상 프론트가 차단당할 수 있음.
 const stripTrailingSlash = (s) => (typeof s === 'string' ? s.replace(/\/+$/, '') : s);
 const PROD_FRONTEND_ORIGIN = stripTrailingSlash(process.env.FRONTEND_URL) || 'https://catchme-29rt.onrender.com';
+// 관리자 페이지(/admin)는 이 서버 자신이 직접 서빙하는 정적 페이지라 Origin이 백엔드 자신의 주소로 찍힘
+// (프론트 도메인이 아님). 같은 출처인데도 브라우저가 POST 요청엔 Origin 헤더를 붙이는 경우가 있어서,
+// 이걸 허용 목록에 안 넣으면 관리자 페이지에서의 로그인 요청이 전부 CORS 에러로 500 처리됨.
+const BACKEND_SELF_ORIGIN = stripTrailingSlash(process.env.BACKEND_URL) || 'https://catchme-backend-d7vh.onrender.com';
 function isAllowedOrigin(origin) {
   if (!origin) return true; // 서버 간 호출, curl, 모바일 앱 등 Origin 헤더 자체가 없는 요청
   if (stripTrailingSlash(origin) === PROD_FRONTEND_ORIGIN) return true;
+  if (stripTrailingSlash(origin) === BACKEND_SELF_ORIGIN) return true; // 관리자 페이지(/admin) 자체에서 오는 요청
   if (/^https?:\/\/(localhost|127\.0\.0\.1)(:\d+)?$/.test(origin)) return true; // 로컬 개발 중 테스트용
   return false;
 }

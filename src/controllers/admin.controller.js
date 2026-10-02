@@ -321,6 +321,74 @@ async function listFeedPosts(req, res) {
   });
 }
 
+// ------------------------------------------------------------
+// 소식 게시물 상세보기 - 목록에서는 요약만 보이던 게시물을 사진/댓글까지 자세히 보여줌
+// ------------------------------------------------------------
+// GET /api/admin/feed-posts/:id
+async function getFeedPostDetail(req, res) {
+  const { id } = req.params;
+
+  const post = await prisma.feedPost.findUnique({
+    where: { id },
+    include: {
+      author: { select: { id: true, username: true, name: true, email: true } },
+      _count: { select: { likes: true, comments: true } },
+    },
+  });
+  if (!post) return res.status(404).json({ message: '게시물을 찾을 수 없어요.' });
+
+  const [comments, reportsCount, reports] = await Promise.all([
+    prisma.feedPostComment.findMany({
+      where: { postId: id },
+      orderBy: { createdAt: 'desc' },
+      take: 20,
+      include: { author: { select: { id: true, username: true, name: true } } },
+    }),
+    prisma.report.count({ where: { targetType: 'FEED_POST', targetId: id } }),
+    prisma.report.findMany({
+      where: { targetType: 'FEED_POST', targetId: id },
+      orderBy: { createdAt: 'desc' },
+      take: 5,
+      include: { reporter: { select: { username: true } } },
+    }),
+  ]);
+
+  return res.json({
+    post: {
+      id: post.id,
+      category: post.category,
+      title: post.title,
+      note: post.note,
+      location: post.location,
+      address: post.address,
+      phone: post.phone,
+      lat: post.lat,
+      lon: post.lon,
+      rating: post.rating,
+      photos: post.photos || [],
+      createdAt: post.createdAt,
+      author: post.author,
+      likeCount: post._count.likes,
+      commentCount: post._count.comments,
+      reportsCount,
+    },
+    comments: comments.map((c) => ({
+      id: c.id,
+      text: c.text,
+      rating: c.rating,
+      createdAt: c.createdAt,
+      author: c.author,
+    })),
+    reports: reports.map((r) => ({
+      id: r.id,
+      reason: r.reason,
+      status: r.status,
+      createdAt: r.createdAt,
+      reporterUsername: r.reporter.username,
+    })),
+  });
+}
+
 // DELETE /api/admin/feed-posts/:id
 async function deleteFeedPost(req, res) {
   const { id } = req.params;
@@ -433,11 +501,248 @@ async function listAdminLogs(req, res) {
   });
 }
 
+// ------------------------------------------------------------
+// 대시보드 그래프 - 날짜별 증감 추이
+// ------------------------------------------------------------
+// metric 이름은 외부 입력을 테이블명에 직접 꽂지 않기 위한 허용 목록(allowlist).
+// req.query.metric 값은 반드시 이 객체의 키 중 하나여야만 통과함 - raw SQL injection 방지.
+const STATS_METRICS = {
+  feedPosts: 'feed_posts', // 소식 게시물
+  users: 'users', // 신규 가입
+  meetups: 'meetups', // 모임 생성
+};
+
+const DATE_ONLY_RE = /^\d{4}-\d{2}-\d{2}$/;
+
+// 'YYYY-MM-DD' 문자열끼리의 날짜 연산 - 실제 시간대 변환 없이 순수 달력 날짜로만 계산
+// (UTC 자정으로 고정해서 계산하면 DST 같은 거 신경 안 써도 됨 - 어차피 날짜 덧셈/뺄셈만 할 거라서)
+function addDaysToDateString(dateStr, delta) {
+  const d = new Date(`${dateStr}T00:00:00Z`);
+  d.setUTCDate(d.getUTCDate() + delta);
+  return d.toISOString().slice(0, 10);
+}
+function daysBetweenDateStrings(startStr, endStr) {
+  const a = new Date(`${startStr}T00:00:00Z`);
+  const b = new Date(`${endStr}T00:00:00Z`);
+  return Math.round((b - a) / (24 * 60 * 60 * 1000));
+}
+function todayKstDateString() {
+  // 한국 시간 기준 "오늘" 날짜를 'YYYY-MM-DD'로 - 서버가 UTC로 돌아도 정확하게 나오게 Intl로 계산
+  return new Intl.DateTimeFormat('en-CA', { timeZone: 'Asia/Seoul' }).format(new Date());
+}
+
+// GET /api/admin/stats/daily?metric=feedPosts&start=2026-09-01&end=2026-10-03
+// 지정한 기간(기본 최근 30일, 한국 시간 기준) 동안 날짜별 생성 건수를 돌려줌.
+// 데이터가 없는 날짜도 0건으로 채워서 연속된 날짜 배열로 반환 - 프론트에서 그래프 그리기 편하게.
+async function getDailyStats(req, res) {
+  const metric = String(req.query.metric || 'feedPosts');
+  const table = STATS_METRICS[metric];
+  if (!table) {
+    return res.status(400).json({
+      message: `metric은 ${Object.keys(STATS_METRICS).join(', ')} 중 하나여야 해요.`,
+    });
+  }
+
+  const todayKst = todayKstDateString();
+  let endDay = DATE_ONLY_RE.test(req.query.end) ? req.query.end : todayKst;
+  let startDay = DATE_ONLY_RE.test(req.query.start) ? req.query.start : addDaysToDateString(endDay, -29);
+
+  if (startDay > endDay) {
+    [startDay, endDay] = [endDay, startDay];
+  }
+
+  // 기간을 너무 넓게 잡으면(1년 초과) 그래프도 의미 없고 쿼리 부담만 커지므로 최대 1년으로 제한
+  const MAX_RANGE_DAYS = 366;
+  if (daysBetweenDateStrings(startDay, endDay) > MAX_RANGE_DAYS) {
+    startDay = addDaysToDateString(endDay, -MAX_RANGE_DAYS);
+  }
+
+  // table은 위 allowlist(STATS_METRICS)에서만 나온 값이라 사용자 입력이 직접 SQL에 꽂히지 않음 -
+  // 날짜 범위($1, $2)는 파라미터 바인딩으로 전달. generate_series로 데이터 없는 날짜도 0건으로 채움.
+  const rows = await prisma.$queryRawUnsafe(
+    `SELECT gs::date AS day, COALESCE(c.count, 0)::int AS count
+     FROM generate_series($1::date, $2::date, interval '1 day') AS gs
+     LEFT JOIN LATERAL (
+       SELECT COUNT(*)::int AS count
+       FROM ${table}
+       WHERE (("createdAt" AT TIME ZONE 'Asia/Seoul')::date) = gs::date
+     ) c ON true
+     ORDER BY gs ASC`,
+    startDay,
+    endDay,
+  );
+
+  // Prisma 쿼리 엔진이 date 컬럼을 Date 객체로 주는지 문자열로 주는지 환경에 따라 다를 수 있어서 둘 다 대응
+  const days = rows.map((r) => ({
+    date: r.day instanceof Date ? r.day.toISOString().slice(0, 10) : String(r.day).slice(0, 10),
+    count: r.count,
+  }));
+  const total = days.reduce((sum, d) => sum + d.count, 0);
+
+  return res.json({ metric, start: startDay, end: endDay, total, days });
+}
+
+// ------------------------------------------------------------
+// 유저 상세보기 - 신고 조사할 때 여러 탭 왔다갔다 안 하고 한 화면에서 보려고 만듦
+// ------------------------------------------------------------
+// GET /api/admin/users/:id
+async function getUserDetail(req, res) {
+  const { id } = req.params;
+
+  const user = await prisma.user.findUnique({
+    where: { id },
+    select: {
+      id: true, email: true, username: true, name: true, bio: true, phone: true,
+      profileImageUrl: true, isSuspended: true, suspendedReason: true, suspendedAt: true,
+      createdAt: true,
+      _count: { select: { feedPosts: true, createdMeetups: true, meetupJoins: true, reportsMade: true } },
+    },
+  });
+  if (!user) return res.status(404).json({ message: '유저를 찾을 수 없어요.' });
+
+  // Report는 신고 대상이 USER/FEED_POST/MEETUP을 다 가리킬 수 있는 polymorphic 구조라
+  // 외래키 관계로 바로 못 가져오고, targetType+targetId로 직접 조회해야 함
+  const [recentPosts, reportsAgainstCount, reportsAgainst] = await Promise.all([
+    prisma.feedPost.findMany({
+      where: { authorId: id },
+      orderBy: { createdAt: 'desc' },
+      take: 5,
+      select: { id: true, title: true, note: true, category: true, createdAt: true },
+    }),
+    prisma.report.count({ where: { targetType: 'USER', targetId: id } }),
+    prisma.report.findMany({
+      where: { targetType: 'USER', targetId: id },
+      orderBy: { createdAt: 'desc' },
+      take: 5,
+      include: { reporter: { select: { username: true } } },
+    }),
+  ]);
+
+  return res.json({
+    user: {
+      id: user.id,
+      email: user.email,
+      username: user.username,
+      name: user.name,
+      bio: user.bio,
+      phone: user.phone,
+      profileImageUrl: user.profileImageUrl,
+      isSuspended: user.isSuspended,
+      suspendedReason: user.suspendedReason,
+      suspendedAt: user.suspendedAt,
+      createdAt: user.createdAt,
+      counts: {
+        feedPosts: user._count.feedPosts,
+        meetupsCreated: user._count.createdMeetups,
+        meetupsJoined: user._count.meetupJoins,
+        reportsMade: user._count.reportsMade,
+        reportsAgainst: reportsAgainstCount,
+      },
+    },
+    recentPosts,
+    reportsAgainst: reportsAgainst.map((r) => ({
+      id: r.id,
+      reason: r.reason,
+      status: r.status,
+      createdAt: r.createdAt,
+      reporterUsername: r.reporter.username,
+    })),
+  });
+}
+
+// ------------------------------------------------------------
+// 신고 상세보기 - 목록에서는 제목만 보이던 신고 대상을 실제 내용까지 자세히 보여줌
+// ------------------------------------------------------------
+// GET /api/admin/reports/:id
+async function getReportDetail(req, res) {
+  const { id } = req.params;
+
+  const report = await prisma.report.findUnique({
+    where: { id },
+    include: { reporter: { select: { id: true, username: true, name: true } } },
+  });
+  if (!report) return res.status(404).json({ message: '신고를 찾을 수 없어요.' });
+
+  let target = { exists: false };
+  if (report.targetType === 'FEED_POST') {
+    const post = await prisma.feedPost.findUnique({
+      where: { id: report.targetId },
+      select: {
+        id: true, title: true, note: true, category: true, location: true, rating: true,
+        photos: true, createdAt: true,
+        author: { select: { id: true, username: true, name: true } },
+      },
+    });
+    if (post) {
+      target = {
+        exists: true,
+        type: 'FEED_POST',
+        id: post.id,
+        title: post.title,
+        note: post.note,
+        category: post.category,
+        location: post.location,
+        rating: post.rating,
+        photoCount: (post.photos || []).length,
+        createdAt: post.createdAt,
+        author: post.author,
+      };
+    }
+  } else if (report.targetType === 'MEETUP') {
+    const meetup = await prisma.meetup.findUnique({
+      where: { id: report.targetId },
+      select: {
+        id: true, title: true, description: true, category: true, location: true,
+        eventDate: true, cancelled: true, createdAt: true,
+        creator: { select: { id: true, username: true, name: true } },
+        _count: { select: { participants: true } },
+      },
+    });
+    if (meetup) {
+      target = {
+        exists: true,
+        type: 'MEETUP',
+        id: meetup.id,
+        title: meetup.title,
+        description: meetup.description,
+        category: meetup.category,
+        location: meetup.location,
+        eventDate: meetup.eventDate,
+        cancelled: meetup.cancelled,
+        createdAt: meetup.createdAt,
+        creator: meetup.creator,
+        participantCount: meetup._count.participants,
+      };
+    }
+  } else if (report.targetType === 'USER') {
+    const user = await prisma.user.findUnique({
+      where: { id: report.targetId },
+      select: { id: true, username: true, name: true, bio: true, isSuspended: true, createdAt: true },
+    });
+    if (user) {
+      target = { exists: true, type: 'USER', ...user };
+    }
+  }
+
+  return res.json({
+    id: report.id,
+    targetType: report.targetType,
+    targetId: report.targetId,
+    reason: report.reason,
+    detail: report.detail,
+    status: report.status,
+    createdAt: report.createdAt,
+    reporter: report.reporter,
+    target,
+  });
+}
+
 module.exports = {
   getOverview,
-  listUsers, suspendUser, unsuspendUser, deleteUser,
-  listReports, resolveReport,
-  listFeedPosts, deleteFeedPost,
+  getDailyStats,
+  listUsers, getUserDetail, suspendUser, unsuspendUser, deleteUser,
+  listReports, getReportDetail, resolveReport,
+  listFeedPosts, getFeedPostDetail, deleteFeedPost,
   listMeetups, cancelMeetup,
   listAdminLogs,
 };

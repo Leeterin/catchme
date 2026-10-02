@@ -3,9 +3,10 @@ const { requireAuth } = require('../middleware/auth.middleware');
 const { requireAdmin } = require('../middleware/admin.middleware');
 const {
   getOverview,
-  listUsers, suspendUser, unsuspendUser, deleteUser,
-  listReports, resolveReport,
-  listFeedPosts, deleteFeedPost,
+  getDailyStats,
+  listUsers, getUserDetail, suspendUser, unsuspendUser, deleteUser,
+  listReports, getReportDetail, resolveReport,
+  listFeedPosts, getFeedPostDetail, deleteFeedPost,
   listMeetups, cancelMeetup,
   listAdminLogs,
 } = require('../controllers/admin.controller');
@@ -17,16 +18,20 @@ const router = express.Router();
 router.use(requireAuth, requireAdmin);
 
 router.get('/overview', getOverview);
+router.get('/stats/daily', getDailyStats);
 
 router.get('/users', listUsers);
+router.get('/users/:id', getUserDetail);
 router.post('/users/:id/suspend', suspendUser);
 router.post('/users/:id/unsuspend', unsuspendUser);
 router.delete('/users/:id', deleteUser);
 
 router.get('/reports', listReports);
+router.get('/reports/:id', getReportDetail);
 router.post('/reports/:id/resolve', resolveReport);
 
 router.get('/feed-posts', listFeedPosts);
+router.get('/feed-posts/:id', getFeedPostDetail);
 router.delete('/feed-posts/:id', deleteFeedPost);
 
 router.get('/meetups', listMeetups);
