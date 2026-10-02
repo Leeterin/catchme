@@ -130,4 +130,132 @@ async function deleteAccount(req, res) {
   return res.json({ message: '계정이 삭제됐어요.' });
 }
 
-module.exports = { updateProfile, updateLocation, deleteAccount };
+// ------------------------------------------------------------
+// 자주 쓰는 출발지 (집/회사/학교/직접입력) - 다중 모임 장소 추천에서 매번 주소를 새로
+// 검색하지 않고 바로 고를 수 있도록 내 정보에 저장해두는 기능
+// ------------------------------------------------------------
+const FIXED_LABELS = ['HOME', 'WORK', 'SCHOOL'];
+const MAX_CUSTOM_LOCATIONS = 10;
+
+function serializeSavedLocation(loc) {
+  return {
+    id: loc.id,
+    label: loc.label,
+    customLabel: loc.customLabel,
+    displayName: loc.label === 'CUSTOM' ? loc.customLabel : { HOME: '집', WORK: '회사', SCHOOL: '학교' }[loc.label],
+    address: loc.address,
+    lat: loc.lat,
+    lon: loc.lon,
+  };
+}
+
+// GET /api/profile/locations
+async function listSavedLocations(req, res) {
+  const locations = await prisma.savedLocation.findMany({
+    where: { userId: req.userId },
+    orderBy: { createdAt: 'asc' },
+  });
+  return res.json({ locations: locations.map(serializeSavedLocation) });
+}
+
+// POST /api/profile/locations   body: { label: 'HOME'|'WORK'|'SCHOOL'|'CUSTOM', customLabel?, address, lat, lon }
+// HOME/WORK/SCHOOL은 이미 있으면 덮어씀(유저당 하나씩). CUSTOM은 매번 새로 생성됨(개수 제한 있음)
+async function saveSavedLocation(req, res) {
+  const { label, customLabel, address, lat, lon } = req.body;
+
+  if (!FIXED_LABELS.includes(label) && label !== 'CUSTOM') {
+    return res.status(400).json({ message: '라벨 값이 올바르지 않아요.' });
+  }
+  if (typeof address !== 'string' || !address.trim()) {
+    return res.status(400).json({ message: '주소를 입력해주세요.' });
+  }
+  if (typeof lat !== 'number' || typeof lon !== 'number' || Number.isNaN(lat) || Number.isNaN(lon)) {
+    return res.status(400).json({ message: '좌표가 올바르지 않아요.' });
+  }
+  if (lat < -90 || lat > 90 || lon < -180 || lon > 180) {
+    return res.status(400).json({ message: '좌표가 올바르지 않아요.' });
+  }
+
+  let trimmedCustomLabel = null;
+  if (label === 'CUSTOM') {
+    trimmedCustomLabel = (customLabel || '').trim();
+    if (!trimmedCustomLabel) {
+      return res.status(400).json({ message: '이름을 입력해주세요. (예: 헬스장, 본가)' });
+    }
+    if (trimmedCustomLabel.length > 10) {
+      return res.status(400).json({ message: '이름은 10자 이내로 입력해주세요.' });
+    }
+  }
+
+  if (FIXED_LABELS.includes(label)) {
+    // 집/회사/학교는 유저당 하나씩만 - 이미 있으면 그 자리에 덮어씀
+    const existing = await prisma.savedLocation.findFirst({ where: { userId: req.userId, label } });
+    const saved = existing
+      ? await prisma.savedLocation.update({ where: { id: existing.id }, data: { address: address.trim(), lat, lon } })
+      : await prisma.savedLocation.create({ data: { userId: req.userId, label, address: address.trim(), lat, lon } });
+    return res.json({ location: serializeSavedLocation(saved) });
+  }
+
+  const customCount = await prisma.savedLocation.count({ where: { userId: req.userId, label: 'CUSTOM' } });
+  if (customCount >= MAX_CUSTOM_LOCATIONS) {
+    return res.status(400).json({ message: `자주 쓰는 장소는 최대 ${MAX_CUSTOM_LOCATIONS}개까지 저장할 수 있어요.` });
+  }
+
+  const saved = await prisma.savedLocation.create({
+    data: { userId: req.userId, label: 'CUSTOM', customLabel: trimmedCustomLabel, address: address.trim(), lat, lon },
+  });
+  return res.status(201).json({ location: serializeSavedLocation(saved) });
+}
+
+// PATCH /api/profile/locations/:id   body: { customLabel?, address?, lat?, lon? }
+async function updateSavedLocation(req, res) {
+  const { id } = req.params;
+  const existing = await prisma.savedLocation.findUnique({ where: { id } });
+  if (!existing || existing.userId !== req.userId) {
+    return res.status(404).json({ message: '저장된 장소를 찾을 수 없어요.' });
+  }
+
+  const { customLabel, address, lat, lon } = req.body;
+  const data = {};
+  if (existing.label === 'CUSTOM' && typeof customLabel === 'string') {
+    const trimmed = customLabel.trim();
+    if (!trimmed) return res.status(400).json({ message: '이름을 입력해주세요.' });
+    if (trimmed.length > 10) return res.status(400).json({ message: '이름은 10자 이내로 입력해주세요.' });
+    data.customLabel = trimmed;
+  }
+  if (typeof address === 'string' && address.trim()) data.address = address.trim();
+  if (typeof lat === 'number' && typeof lon === 'number' && !Number.isNaN(lat) && !Number.isNaN(lon)) {
+    if (lat < -90 || lat > 90 || lon < -180 || lon > 180) {
+      return res.status(400).json({ message: '좌표가 올바르지 않아요.' });
+    }
+    data.lat = lat;
+    data.lon = lon;
+  }
+  if (Object.keys(data).length === 0) {
+    return res.status(400).json({ message: '변경할 내용이 없어요.' });
+  }
+
+  const updated = await prisma.savedLocation.update({ where: { id }, data });
+  return res.json({ location: serializeSavedLocation(updated) });
+}
+
+// DELETE /api/profile/locations/:id
+async function deleteSavedLocation(req, res) {
+  const { id } = req.params;
+  const existing = await prisma.savedLocation.findUnique({ where: { id } });
+  if (!existing || existing.userId !== req.userId) {
+    return res.status(404).json({ message: '저장된 장소를 찾을 수 없어요.' });
+  }
+  await prisma.savedLocation.delete({ where: { id } });
+  return res.json({ message: '삭제됐어요.' });
+}
+
+module.exports = {
+  updateProfile,
+  updateLocation,
+  deleteAccount,
+  listSavedLocations,
+  saveSavedLocation,
+  updateSavedLocation,
+  deleteSavedLocation,
+};

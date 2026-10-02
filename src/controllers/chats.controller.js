@@ -1,6 +1,7 @@
 const prisma = require('../lib/prisma');
 const { getIo } = require('../lib/socket');
 const { isAllowedImageDataUrl } = require('../lib/validators');
+const { computeRecommendation } = require('../lib/locationRecommend');
 
 const MEMBER_USER_SELECT = {
   id: true,
@@ -89,6 +90,23 @@ function serializeMessage(message) {
         locationLon: message.locationLon,
         pinId: message.locationNote || null, // 이 알림이 어느 핀(PinnedItem)에 속하는지 - locationNote 필드를 링크용으로 재사용함
         superseded: message.locationStatus === 'SUPERSEDED', // 장소가 그 뒤에 또 바뀌어서, 이제 예전 알림이 된 경우
+      },
+    };
+  }
+
+  if (message.type === 'LOCATION_RECOMMEND') {
+    return {
+      ...base,
+      // 참가자 개별 출발지/개별 이동시간은 절대 포함하지 않음 - 추천 결과(지역/좌표)와 집계값(평균/최장)만 공개
+      locationRecommend: {
+        requestId: message.recommendRequestId,
+        areaName: message.recommendAreaName,
+        lat: message.recommendLat,
+        lon: message.recommendLon,
+        mode: message.recommendMode,
+        avgMinutes: message.recommendAvgMinutes,
+        maxMinutes: message.recommendMaxMinutes,
+        participants: message.recommendParticipants,
       },
     };
   }
@@ -1402,6 +1420,205 @@ async function deletePin(req, res) {
   return res.json({ message: '핀을 삭제했어요.' });
 }
 
+// ------------------------------------------------------------
+// 다중 모임 자동 장소 추천 (그룹 채팅방 전용)
+// 참가자 개별 출발지는 LocationRecommendResponse에만 비공개로 저장되고, API 응답/소켓 이벤트 어디에도
+// 그대로 노출되지 않음 - 계산이 끝나면 추천 지역 + 평균/최장 이동시간 같은 집계값만 담은
+// LOCATION_RECOMMEND 메시지 하나가 그룹방에 생성됨.
+// ------------------------------------------------------------
+const LOCATION_RECOMMEND_MODES = ['FAIR', 'FASTEST', 'CONSIDERATE'];
+
+// savedLocationId로 저장된 출발지를 쓰거나, address+lat+lon을 직접 받아서 좌표를 확정함
+async function resolveLocationInput(userId, body) {
+  const { savedLocationId, address, lat, lon } = body;
+  if (savedLocationId) {
+    const saved = await prisma.savedLocation.findUnique({ where: { id: savedLocationId } });
+    if (!saved || saved.userId !== userId) {
+      return { ok: false, statusCode: 404, message: '저장된 출발지를 찾을 수 없어요.' };
+    }
+    return { ok: true, address: saved.address, lat: saved.lat, lon: saved.lon };
+  }
+  if (typeof address === 'string' && address.trim() && typeof lat === 'number' && typeof lon === 'number' && !Number.isNaN(lat) && !Number.isNaN(lon)) {
+    if (lat < -90 || lat > 90 || lon < -180 || lon > 180) {
+      return { ok: false, statusCode: 400, message: '좌표가 올바르지 않아요.' };
+    }
+    return { ok: true, address: address.trim(), lat, lon };
+  }
+  return { ok: false, statusCode: 400, message: '출발지를 저장된 장소 중에서 고르거나, 주소를 입력해주세요.' };
+}
+
+// 현재 COLLECTING 상태인 요청에 대해, 그룹 멤버 전원이 제출했으면(또는 force=true면 2명 이상 제출 시)
+// 계산을 돌려서 결과 메시지를 만들고 COMPLETED로 바꿈. 아직 조건이 안 되면 아무 것도 안 하고 null 반환
+async function tryFinalizeLocationRecommend(requestId, { force = false } = {}) {
+  const request = await prisma.locationRecommendRequest.findUnique({
+    where: { id: requestId },
+    include: { responses: true },
+  });
+  if (!request || request.status !== 'COLLECTING') return null;
+
+  const memberCount = await prisma.chatRoomMember.count({ where: { chatRoomId: request.chatRoomId } });
+  const responseCount = request.responses.length;
+  if (!force && responseCount < memberCount) return null;
+  if (responseCount < 2) return null;
+
+  const points = request.responses.map((r) => ({ lat: r.lat, lon: r.lon }));
+  const result = await computeRecommendation(points, request.mode);
+  if (!result) return null;
+
+  const [, message] = await prisma.$transaction([
+    prisma.locationRecommendRequest.update({ where: { id: requestId }, data: { status: 'COMPLETED', completedAt: new Date() } }),
+    prisma.message.create({
+      data: {
+        chatRoomId: request.chatRoomId,
+        senderId: request.requesterId,
+        type: 'LOCATION_RECOMMEND',
+        recommendRequestId: requestId,
+        recommendAreaName: result.areaName,
+        recommendLat: result.lat,
+        recommendLon: result.lon,
+        recommendMode: request.mode,
+        recommendAvgMinutes: result.avgMinutes,
+        recommendMaxMinutes: result.maxMinutes,
+        recommendParticipants: result.participantCount,
+      },
+    }),
+  ]);
+
+  // 다른 메시지 타입들과 똑같이 'newMessage' 하나로만 알림 - 그룹방에 결과 카드가 새 메시지로 도착함
+  await notifyRoom(request.chatRoomId, request.requesterId, 'newMessage', { roomId: request.chatRoomId, message: serializeMessage(message) });
+
+  return message;
+}
+
+// POST /api/chats/:roomId/location-recommend   body: { mode, savedLocationId? | address?, lat?, lon? }
+// 그룹방 멤버가 "모임 장소 추천받기"를 시작 - 본인 출발지도 함께 제출해야 함(자기 자신도 참가자이므로)
+async function requestLocationRecommend(req, res) {
+  const { roomId } = req.params;
+  const { mode } = req.body;
+
+  if (!LOCATION_RECOMMEND_MODES.includes(mode)) {
+    return res.status(400).json({ message: '추천 기준(mode)이 올바르지 않아요.' });
+  }
+  const room = await prisma.chatRoom.findUnique({ where: { id: roomId }, include: { members: true } });
+  if (!room || !room.members.some((m) => m.userId === req.userId)) {
+    return res.status(403).json({ message: '이 채팅방에 접근할 권한이 없어요.' });
+  }
+  if (!room.isGroup) {
+    return res.status(400).json({ message: '장소 추천은 그룹 채팅방에서만 쓸 수 있어요.' });
+  }
+  if (room.members.length < 2) {
+    return res.status(400).json({ message: '참가자가 2명 이상이어야 추천을 받을 수 있어요.' });
+  }
+  const existing = await prisma.locationRecommendRequest.findFirst({ where: { chatRoomId: roomId, status: 'COLLECTING' } });
+  if (existing) {
+    return res.status(409).json({ message: '이미 진행 중인 장소 추천이 있어요.', requestId: existing.id });
+  }
+
+  const resolved = await resolveLocationInput(req.userId, req.body);
+  if (!resolved.ok) return res.status(resolved.statusCode).json({ message: resolved.message });
+
+  const request = await prisma.locationRecommendRequest.create({
+    data: {
+      chatRoomId: roomId,
+      requesterId: req.userId,
+      mode,
+      responses: { create: [{ userId: req.userId, address: resolved.address, lat: resolved.lat, lon: resolved.lon }] },
+    },
+  });
+
+  // 나를 제외한 멤버들에게 "출발지를 입력해주세요" 개인 알림 전송 (그룹방 메시지로 남기지 않음 - 각자 비공개로 입력하는 흐름이라서)
+  const otherIds = room.members.map((m) => m.userId).filter((id) => id !== req.userId);
+  const io = getIo();
+  if (io) {
+    otherIds.forEach((userId) => {
+      io.to(`user:${userId}`).emit('locationRecommendRequested', { roomId, requestId: request.id, mode });
+    });
+  }
+
+  return res.status(201).json({ requestId: request.id, mode, status: request.status });
+}
+
+// POST /api/chats/location-recommend/:requestId/respond   body: { savedLocationId? | address?, lat?, lon? }
+async function respondLocationRecommend(req, res) {
+  const { requestId } = req.params;
+  const request = await prisma.locationRecommendRequest.findUnique({ where: { id: requestId } });
+  if (!request) return res.status(404).json({ message: '추천 요청을 찾을 수 없어요.' });
+  if (!(await assertMembership(request.chatRoomId, req.userId))) {
+    return res.status(403).json({ message: '이 채팅방에 접근할 권한이 없어요.' });
+  }
+  if (request.status !== 'COLLECTING') {
+    return res.status(409).json({ message: '이미 끝난 추천 요청이에요.' });
+  }
+
+  const resolved = await resolveLocationInput(req.userId, req.body);
+  if (!resolved.ok) return res.status(resolved.statusCode).json({ message: resolved.message });
+
+  await prisma.locationRecommendResponse.upsert({
+    where: { requestId_userId: { requestId, userId: req.userId } },
+    update: { address: resolved.address, lat: resolved.lat, lon: resolved.lon },
+    create: { requestId, userId: req.userId, address: resolved.address, lat: resolved.lat, lon: resolved.lon },
+  });
+
+  const completedMessage = await tryFinalizeLocationRecommend(requestId);
+  return res.json({ submitted: true, completed: !!completedMessage });
+}
+
+// GET /api/chats/location-recommend/:requestId/status
+// 누가 냈는지/어디서 냈는지는 절대 안 돌려주고, 숫자(진행 상황)만 돌려줌
+async function getLocationRecommendStatus(req, res) {
+  const { requestId } = req.params;
+  const request = await prisma.locationRecommendRequest.findUnique({ where: { id: requestId }, include: { responses: true } });
+  if (!request) return res.status(404).json({ message: '추천 요청을 찾을 수 없어요.' });
+  if (!(await assertMembership(request.chatRoomId, req.userId))) {
+    return res.status(403).json({ message: '이 채팅방에 접근할 권한이 없어요.' });
+  }
+  const memberCount = await prisma.chatRoomMember.count({ where: { chatRoomId: request.chatRoomId } });
+  return res.json({
+    requestId: request.id,
+    mode: request.mode,
+    status: request.status,
+    totalMembers: memberCount,
+    respondedCount: request.responses.length,
+    iHaveResponded: request.responses.some((r) => r.userId === req.userId),
+    isRequester: request.requesterId === req.userId,
+  });
+}
+
+// POST /api/chats/location-recommend/:requestId/complete — 일부가 끝내 제출하지 않을 때, 요청자가 지금까지
+// 제출된 인원(2명 이상)만으로 바로 계산하게 강제함
+async function completeLocationRecommendNow(req, res) {
+  const { requestId } = req.params;
+  const request = await prisma.locationRecommendRequest.findUnique({ where: { id: requestId } });
+  if (!request) return res.status(404).json({ message: '추천 요청을 찾을 수 없어요.' });
+  if (request.requesterId !== req.userId) {
+    return res.status(403).json({ message: '추천을 요청한 사람만 지금 바로 계산할 수 있어요.' });
+  }
+  if (request.status !== 'COLLECTING') {
+    return res.status(409).json({ message: '이미 끝난 추천 요청이에요.' });
+  }
+  const completedMessage = await tryFinalizeLocationRecommend(requestId, { force: true });
+  if (!completedMessage) {
+    return res.status(400).json({ message: '아직 제출한 인원이 2명 미만이라 계산할 수 없어요.' });
+  }
+  return res.json({ completed: true });
+}
+
+// POST /api/chats/location-recommend/:requestId/cancel
+async function cancelLocationRecommend(req, res) {
+  const { requestId } = req.params;
+  const request = await prisma.locationRecommendRequest.findUnique({ where: { id: requestId } });
+  if (!request) return res.status(404).json({ message: '추천 요청을 찾을 수 없어요.' });
+  if (request.requesterId !== req.userId) {
+    return res.status(403).json({ message: '추천을 요청한 사람만 취소할 수 있어요.' });
+  }
+  if (request.status !== 'COLLECTING') {
+    return res.status(409).json({ message: '이미 끝난 추천 요청이에요.' });
+  }
+  await prisma.locationRecommendRequest.update({ where: { id: requestId }, data: { status: 'CANCELLED' } });
+  await notifyRoom(request.chatRoomId, req.userId, 'locationRecommendCancelled', { roomId: request.chatRoomId, requestId });
+  return res.json({ cancelled: true });
+}
+
 module.exports = {
   listChatRooms,
   getOrCreateDirectRoom,
@@ -1430,4 +1647,9 @@ module.exports = {
   createPin,
   updatePin,
   deletePin,
+  requestLocationRecommend,
+  respondLocationRecommend,
+  getLocationRecommendStatus,
+  completeLocationRecommendNow,
+  cancelLocationRecommend,
 };

@@ -77,6 +77,9 @@ model User {
   friendSettingsReceived FriendSettings[] @relation("SettingsFriend")
   friendGroups     FriendGroup[]       @relation("GroupOwner")
   groupMemberships FriendGroupMember[] @relation("GroupMemberOf")
+  savedLocations   SavedLocation[]
+  locationRecommendRequestsMade LocationRecommendRequest[]
+  locationRecommendResponses    LocationRecommendResponse[]
   settings       UserSettings?
   blockedUsers   Block[] @relation("Blocker")
   blockedByUsers Block[] @relation("Blocked")
@@ -156,7 +159,20 @@ enum MessageType {
   TIME_PROPOSAL
   LOCATION_SUGGEST
   LOCATION_NOTICE // 채팅방에 고정된 장소(PinnedItem)가 등록/변경됐을 때 상대방에게 알려주는 일방향 알림 메시지
+  LOCATION_RECOMMEND // 다중 모임 자동 장소 추천 - 참가자 출발지 기반, 결과만 그룹에 공유(개인 출발지는 비공개)
   IMAGE
+}
+
+enum LocationRecommendMode {
+  FAIR       // 공평하게 - 참가자 간 이동시간 차이 최소화
+  FASTEST    // 가장 빠르게 - 전체 평균 이동시간 최소화
+  CONSIDERATE // 먼 사람 배려 - 가장 오래 걸리는 사람의 이동시간 최소화
+}
+
+enum LocationRecommendStatus {
+  COLLECTING // 참가자들의 출발지 제출을 기다리는 중
+  COMPLETED  // 계산 완료, 결과 메시지가 그룹에 게시됨
+  CANCELLED  // 요청자가 취소함
 }
 
 enum ProposalStatus {
@@ -184,6 +200,7 @@ model ChatRoom {
   messages Message[]
   pinnedItems PinnedItem[]
   meetup   Meetup?
+  locationRecommendRequests LocationRecommendRequest[]
 
   @@map("chat_rooms")
 }
@@ -242,8 +259,59 @@ model Message {
   proposalStatus ProposalStatus?
   proposalOptions TimeProposalOption[]
 
+  // LOCATION_RECOMMEND 메시지일 때 (다중 모임 자동 장소 추천 결과 - 참가자 개별 출발지/개별 이동시간은
+  // 절대 포함하지 않고, 추천된 동네/지역과 전체 평균·최장 이동시간 같은 집계값만 담음)
+  recommendRequestId    String?                @unique
+  recommendRequest      LocationRecommendRequest? @relation(fields: [recommendRequestId], references: [id])
+  recommendAreaName     String? // 추천된 동네/지역 이름 (예: "강남역 부근")
+  recommendLat          Float?
+  recommendLon          Float?
+  recommendMode         LocationRecommendMode?
+  recommendAvgMinutes   Int?
+  recommendMaxMinutes   Int?
+  recommendParticipants Int? // 계산에 참여한 인원 수
+
   @@index([chatRoomId, createdAt])
   @@map("messages")
+}
+
+// ------------------------------------------------------------
+// LocationRecommendRequest (다중 모임 자동 장소 추천 - 요청 한 건)
+// 참가자별 출발지(LocationRecommendResponse)는 이 요청에 딸려서 비공개로만 보관되고,
+// 계산이 끝나면 집계 결과만 Message(LOCATION_RECOMMEND)로 그룹에 공개됨
+// ------------------------------------------------------------
+model LocationRecommendRequest {
+  id          String                    @id @default(uuid())
+  chatRoomId  String
+  chatRoom    ChatRoom                  @relation(fields: [chatRoomId], references: [id], onDelete: Cascade)
+  requesterId String
+  requester   User                      @relation(fields: [requesterId], references: [id], onDelete: Cascade)
+  mode        LocationRecommendMode
+  status      LocationRecommendStatus  @default(COLLECTING)
+  createdAt   DateTime                  @default(now())
+  completedAt DateTime?
+
+  responses   LocationRecommendResponse[]
+  resultMessage Message?
+
+  @@index([chatRoomId])
+  @@map("location_recommend_requests")
+}
+
+// 참가자 한 명이 제출한 출발지 - 서버 계산에만 쓰이고, API 응답/다른 유저에게는 절대 노출되지 않음
+model LocationRecommendResponse {
+  id          String                   @id @default(uuid())
+  requestId   String
+  request     LocationRecommendRequest @relation(fields: [requestId], references: [id], onDelete: Cascade)
+  userId      String
+  user        User                     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  address     String
+  lat         Float
+  lon         Float
+  submittedAt DateTime                 @default(now())
+
+  @@unique([requestId, userId])
+  @@map("location_recommend_responses")
 }
 
 // 시간 제안 메시지 하나에 딸린 시간 후보 하나
@@ -374,6 +442,35 @@ model FriendGroupMember {
 
   @@unique([groupId, friendId])
   @@map("friend_group_members")
+}
+
+// ------------------------------------------------------------
+// SavedLocation (내 정보에 저장해두는 자주 쓰는 출발지 - 집/회사/학교/직접입력)
+// 그룹 채팅방에서 "모임 장소 추천"을 받을 때 매번 주소를 새로 검색하지 않고
+// 바로 골라서 쓸 수 있게 함. HOME/WORK/SCHOOL은 유저당 하나씩만(저장할 때 upsert),
+// CUSTOM은 여러 개 저장 가능(앱단에서 개수 제한).
+// ------------------------------------------------------------
+model SavedLocation {
+  id          String             @id @default(uuid())
+  userId      String
+  user        User               @relation(fields: [userId], references: [id], onDelete: Cascade)
+  label       SavedLocationLabel @default(CUSTOM)
+  customLabel String? // label이 CUSTOM일 때 사용자가 직접 붙인 이름 (예: "본가", "헬스장")
+  address     String // 화면에 보여줄 주소 텍스트
+  lat         Float
+  lon         Float
+  createdAt   DateTime           @default(now())
+  updatedAt   DateTime           @updatedAt
+
+  @@index([userId])
+  @@map("saved_locations")
+}
+
+enum SavedLocationLabel {
+  HOME
+  WORK
+  SCHOOL
+  CUSTOM
 }
 
 // ------------------------------------------------------------

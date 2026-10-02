@@ -29,6 +29,11 @@ const {
   createPin,
   updatePin,
   deletePin,
+  requestLocationRecommend,
+  respondLocationRecommend,
+  getLocationRecommendStatus,
+  completeLocationRecommendNow,
+  cancelLocationRecommend,
 } = require('../controllers/chats.controller');
 
 const router = express.Router();
@@ -62,5 +67,10 @@ router.post('/location-suggestions/:messageId/accept', acceptLocationSuggest);
 router.post('/location-suggestions/:messageId/decline', declineLocationSuggest);
 router.post('/location-suggestions/:messageId/withdraw', withdrawLocationSuggest);
 router.post('/location-suggestions/:messageId/cancel', cancelLocationSuggestMessage);
+router.post('/:roomId/location-recommend', requestLocationRecommend);
+router.post('/location-recommend/:requestId/respond', respondLocationRecommend);
+router.get('/location-recommend/:requestId/status', getLocationRecommendStatus);
+router.post('/location-recommend/:requestId/complete', completeLocationRecommendNow);
+router.post('/location-recommend/:requestId/cancel', cancelLocationRecommend);
 
 module.exports = router;
