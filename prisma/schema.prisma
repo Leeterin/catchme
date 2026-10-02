@@ -461,6 +461,7 @@ model PinnedItem {
   timeLabel       String?
   note            String?
   location        String?
+  locationAddress String? // 장소의 주소 (상단 고정 카드에 장소 이름 아래 같이 보여줌)
   locationLat     Float?
   locationLon     Float?
   sourceMessageId String?

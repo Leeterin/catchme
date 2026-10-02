@@ -881,16 +881,35 @@ async function confirmLocationSuggestionTx(tx, message) {
   await tx.message.update({ where: { id: message.id }, data: { locationStatus: 'CONFIRMED' } });
   // 날짜 없이 "장소만" 고정해두던 예전 핀이 있으면 지우고 이번 걸로 새로 고정함 (안 그러면 이 방에
   // 장소 핀이 여러 개 쌓여서, 상단 고정 영역에 예전 장소들이 유령처럼 계속 같이 떠 있게 됨)
+  const oldPlacePins = await tx.pinnedItem.findMany({
+    where: { chatRoomId: message.chatRoomId, dateLabel: null },
+    select: { location: true },
+  });
   await tx.pinnedItem.deleteMany({ where: { chatRoomId: message.chatRoomId, dateLabel: null } });
+  const placeData = {
+    location: message.locationPlace,
+    locationAddress: message.locationAddress && message.locationAddress !== message.locationPlace ? message.locationAddress : null,
+    locationLat: message.locationLat,
+    locationLon: message.locationLon,
+  };
   await tx.pinnedItem.create({
     data: {
       chatRoomId: message.chatRoomId,
       note: message.locationNote,
-      location: message.locationPlace,
-      locationLat: message.locationLat,
-      locationLon: message.locationLon,
+      ...placeData,
       sourceMessageId: message.id,
     },
+  });
+  // 상단 고정 카드(확정된 일정)의 "장소 정하기" 칸에도 정해진 장소/주소가 바로 뜨게 - 아직 장소가 없던 일정이나,
+  // 예전에 장소 투표/픽스로 정해졌던 장소가 들어있던 일정만 바꿈 (사람이 직접 따로 정해둔 장소는 덮어쓰지 않음)
+  const oldPlaces = oldPlacePins.map((p) => p.location).filter(Boolean);
+  await tx.pinnedItem.updateMany({
+    where: {
+      chatRoomId: message.chatRoomId,
+      dateLabel: { not: null },
+      OR: [{ location: null }, { location: '' }, ...(oldPlaces.length ? [{ location: { in: oldPlaces } }] : [])],
+    },
+    data: placeData,
   });
   await tx.message.updateMany({
     where: { chatRoomId: message.chatRoomId, type: 'LOCATION_SUGGEST', locationStatus: 'PENDING', id: { not: message.id } },
@@ -1457,7 +1476,7 @@ async function createPin(req, res) {
   if (!(await assertMembership(roomId, req.userId))) {
     return res.status(403).json({ message: '이 채팅방에 접근할 권한이 없어요.' });
   }
-  const { dateLabel, timeLabel, note, location, locationLat, locationLon, sourceMessageId } = req.body;
+  const { dateLabel, timeLabel, note, location, locationAddress, locationLat, locationLon, sourceMessageId } = req.body;
   const pin = await prisma.pinnedItem.create({
     data: {
       chatRoomId: roomId,
@@ -1465,6 +1484,7 @@ async function createPin(req, res) {
       timeLabel: timeLabel || null,
       note: note || null,
       location: location || null,
+      locationAddress: typeof locationAddress === 'string' && locationAddress ? locationAddress.slice(0, 200) : null,
       locationLat: typeof locationLat === 'number' ? locationLat : null,
       locationLon: typeof locationLon === 'number' ? locationLon : null,
       sourceMessageId: sourceMessageId || null,
@@ -1481,11 +1501,16 @@ async function updatePin(req, res) {
   if (!pin || !(await assertMembership(pin.chatRoomId, req.userId))) {
     return res.status(404).json({ message: '핀을 찾을 수 없어요.' });
   }
-  const { location, locationLat, locationLon } = req.body;
+  const { location, locationAddress, locationLat, locationLon } = req.body;
+  // 장소가 바뀌었는데 주소를 안 보냈으면, 예전 장소의 주소가 남지 않게 비움
+  let nextAddress;
+  if (locationAddress !== undefined) nextAddress = typeof locationAddress === 'string' && locationAddress ? locationAddress.slice(0, 200) : null;
+  else if (location !== undefined) nextAddress = null;
   const updated = await prisma.pinnedItem.update({
     where: { id: pinId },
     data: {
       location: location !== undefined ? location : undefined,
+      locationAddress: nextAddress,
       locationLat: locationLat !== undefined ? (typeof locationLat === 'number' ? locationLat : null) : undefined,
       locationLon: locationLon !== undefined ? (typeof locationLon === 'number' ? locationLon : null) : undefined,
     },
@@ -1502,7 +1527,7 @@ async function updatePin(req, res) {
         senderId: req.userId,
         type: 'LOCATION_NOTICE',
         locationPlace: location,
-        locationAddress: location,
+        locationAddress: nextAddress || location,
         locationLat: typeof locationLat === 'number' ? locationLat : null,
         locationLon: typeof locationLon === 'number' ? locationLon : null,
         locationNote: pin.id, // LOCATION_NOTICE에서는 이 필드를 "어느 핀 소속인지" 링크용으로 재사용함
