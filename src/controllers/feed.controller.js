@@ -69,11 +69,20 @@ function serializePost(post, myUserId) {
     avgRating: avgRating !== null ? Math.round(avgRating * 10) / 10 : null,
     ratingCount: allRatings.length,
     photos: post.photos || [],
+    tags: post.tags || [],
+    fromMeetup: !!post.fromMeetup,
     likeCount: post._count ? post._count.likes : likes.length,
     commentCount: post._count ? post._count.comments : (post.comments ? post.comments.length : undefined),
     likedByMe: myUserId ? likes.some((l) => l.userId === myUserId) : false,
     createdAt: post.createdAt,
   };
+}
+
+// 약속 후 후기에서 고를 수 있는 항목 (이외의 값은 버림)
+const REVIEW_TAGS = ['talk', 'group', 'price', 'revisit'];
+function parseTags(raw) {
+  if (!Array.isArray(raw)) return [];
+  return [...new Set(raw.filter((t) => REVIEW_TAGS.includes(t)))];
 }
 
 function serializeComment(comment) {
@@ -136,10 +145,10 @@ async function listFeedPosts(req, res) {
   return res.json({ posts: result });
 }
 
-// POST /api/feed   body: { category, title, note?, rating?, photos?, location?, address?, phone?, lat?, lon? }
+// POST /api/feed   body: { category, title, note?, rating?, photos?, location?, address?, phone?, lat?, lon?, tags?, fromMeetup? }
 // 게시물을 독립적으로 하나 만듦 (다른 사람 글과 안 묶임)
 async function createFeedPost(req, res) {
-  const { category, title, note, rating, photos, location, address, phone, lat, lon } = req.body;
+  const { category, title, note, rating, photos, location, address, phone, lat, lon, tags, fromMeetup } = req.body;
   if (!category || !category.trim()) {
     return res.status(400).json({ message: '카테고리를 선택해주세요.' });
   }
@@ -167,6 +176,8 @@ async function createFeedPost(req, res) {
       note: note || null,
       rating: typeof rating === 'number' ? rating : null,
       photos: validPhotos || [],
+      tags: parseTags(tags),
+      fromMeetup: fromMeetup === true,
     },
     include: { author: { select: { id: true, username: true, name: true, profileImageUrl: true, reviewNickname: true, reviewAvatarUrl: true } }, likes: true },
   });
@@ -174,7 +185,7 @@ async function createFeedPost(req, res) {
   return res.status(201).json({ post: serializePost(post, req.userId) });
 }
 
-// PATCH /api/feed/:id   body: { title?, note?, rating?, photos?, location?, address?, phone?, lat?, lon? }  - 작성자 본인만 수정 가능
+// PATCH /api/feed/:id   body: { title?, note?, rating?, photos?, location?, address?, phone?, lat?, lon?, tags? }  - 작성자 본인만 수정 가능
 async function updateFeedPost(req, res) {
   const { id } = req.params;
   const post = await prisma.feedPost.findUnique({ where: { id } });
@@ -183,8 +194,9 @@ async function updateFeedPost(req, res) {
     return res.status(403).json({ message: '작성자만 수정할 수 있어요.' });
   }
 
-  const { title, note, rating, photos, location, address, phone, lat, lon } = req.body;
+  const { title, note, rating, photos, location, address, phone, lat, lon, tags } = req.body;
   const data = {};
+  if (Array.isArray(tags)) data.tags = parseTags(tags);
   if (typeof title === 'string') {
     if (!title.trim()) return res.status(400).json({ message: '제목을 입력해주세요.' });
     data.title = title.trim();

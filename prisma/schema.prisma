@@ -588,6 +588,8 @@ model FeedPost {
   note      String?
   rating    Int? // 1~5점 별점 (선택)
   photos    String[] @default([]) // base64 이미지 문자열 배열 (1~5장, 장당 대략 500KB 이하)
+  tags      String[] @default([]) // 약속 후 후기에서 고른 항목들 ("talk" | "group" | "price" | "revisit")
+  fromMeetup Boolean @default(false) // 채팅방 약속이 끝난 뒤 "오늘 여기서 만나보니 어땠어요?"로 남긴 후기
   createdAt DateTime @default(now())
 
   likes    FeedPostLike[]
