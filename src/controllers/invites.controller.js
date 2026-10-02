@@ -152,6 +152,9 @@ function serializePoll(poll, { userId, guestKey, openCells } = {}) {
     startHour: poll.startHour,
     endHour: poll.endHour,
     fromCalendar: poll.fromCalendar,
+    place: poll.placeName
+      ? { name: poll.placeName, address: poll.placeAddress || '', lat: poll.placeLat, lon: poll.placeLon }
+      : null,
     // 캘린더 기준 링크: 지금 고를 수 있는 칸 (만든 사람의 예약 가능 시간). null이면 범위 안 전부
     openCells: openCells ? [...openCells].sort() : null,
     status: poll.status,
@@ -181,7 +184,25 @@ async function findPollByToken(token) {
 }
 
 function confirmedEventTitle(poll) {
-  return poll.title.length > 40 ? poll.title.slice(0, 40) : poll.title;
+  const base = poll.title.length > 40 ? poll.title.slice(0, 40) : poll.title;
+  return poll.placeName ? `${base} @ ${poll.placeName}`.slice(0, 80) : base;
+}
+
+// { name, address, lat, lon } -> 저장할 값 (이름이 없으면 장소 없음)
+function parsePlace(raw) {
+  if (!raw || typeof raw !== 'object') return null;
+  const name = String(raw.name || '').trim().slice(0, 60);
+  if (!name) return null;
+  const lat = Number(raw.lat);
+  const lon = Number(raw.lon);
+  const hasCoords = raw.lat !== null && raw.lon !== null && Number.isFinite(lat) && Number.isFinite(lon)
+    && Math.abs(lat) <= 90 && Math.abs(lon) <= 180;
+  return {
+    placeName: name,
+    placeAddress: String(raw.address || '').trim().slice(0, 120) || null,
+    placeLat: hasCoords ? lat : null,
+    placeLon: hasCoords ? lon : null,
+  };
 }
 
 // 확정된 약속을 이 사람 캘린더에 넣음 (같은 시간/제목으로 이미 있으면 다시 만들지 않음)
@@ -225,7 +246,7 @@ async function myAvailability(req, res) {
   }
 }
 
-// POST /api/invites  { title, dates: ["YYYY-MM-DD"], startHour, endHour, fromCalendar }
+// POST /api/invites  { title, dates: ["YYYY-MM-DD"], startHour, endHour, fromCalendar, place? }
 // fromCalendar면 startHour/endHour는 무시하고, 고른 날짜들의 내 예약 가능 시간으로 범위를 정함
 async function createInvite(req, res) {
   try {
@@ -264,6 +285,7 @@ async function createInvite(req, res) {
         startHour,
         endHour,
         fromCalendar,
+        ...(parsePlace(req.body.place) || {}),
       },
       include: POLL_INCLUDE,
     });
