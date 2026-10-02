@@ -433,8 +433,90 @@ async function listAdminLogs(req, res) {
   });
 }
 
+// ------------------------------------------------------------
+// 대시보드 그래프 - 날짜별 증감 추이
+// ------------------------------------------------------------
+// metric 이름은 외부 입력을 테이블명에 직접 꽂지 않기 위한 허용 목록(allowlist).
+// req.query.metric 값은 반드시 이 객체의 키 중 하나여야만 통과함 - raw SQL injection 방지.
+const STATS_METRICS = {
+  feedPosts: 'feed_posts', // 소식 게시물
+  users: 'users', // 신규 가입
+  meetups: 'meetups', // 모임 생성
+};
+
+const DATE_ONLY_RE = /^\d{4}-\d{2}-\d{2}$/;
+
+// 'YYYY-MM-DD' 문자열끼리의 날짜 연산 - 실제 시간대 변환 없이 순수 달력 날짜로만 계산
+// (UTC 자정으로 고정해서 계산하면 DST 같은 거 신경 안 써도 됨 - 어차피 날짜 덧셈/뺄셈만 할 거라서)
+function addDaysToDateString(dateStr, delta) {
+  const d = new Date(`${dateStr}T00:00:00Z`);
+  d.setUTCDate(d.getUTCDate() + delta);
+  return d.toISOString().slice(0, 10);
+}
+function daysBetweenDateStrings(startStr, endStr) {
+  const a = new Date(`${startStr}T00:00:00Z`);
+  const b = new Date(`${endStr}T00:00:00Z`);
+  return Math.round((b - a) / (24 * 60 * 60 * 1000));
+}
+function todayKstDateString() {
+  // 한국 시간 기준 "오늘" 날짜를 'YYYY-MM-DD'로 - 서버가 UTC로 돌아도 정확하게 나오게 Intl로 계산
+  return new Intl.DateTimeFormat('en-CA', { timeZone: 'Asia/Seoul' }).format(new Date());
+}
+
+// GET /api/admin/stats/daily?metric=feedPosts&start=2026-09-01&end=2026-10-03
+// 지정한 기간(기본 최근 30일, 한국 시간 기준) 동안 날짜별 생성 건수를 돌려줌.
+// 데이터가 없는 날짜도 0건으로 채워서 연속된 날짜 배열로 반환 - 프론트에서 그래프 그리기 편하게.
+async function getDailyStats(req, res) {
+  const metric = String(req.query.metric || 'feedPosts');
+  const table = STATS_METRICS[metric];
+  if (!table) {
+    return res.status(400).json({
+      message: `metric은 ${Object.keys(STATS_METRICS).join(', ')} 중 하나여야 해요.`,
+    });
+  }
+
+  const todayKst = todayKstDateString();
+  let endDay = DATE_ONLY_RE.test(req.query.end) ? req.query.end : todayKst;
+  let startDay = DATE_ONLY_RE.test(req.query.start) ? req.query.start : addDaysToDateString(endDay, -29);
+
+  if (startDay > endDay) {
+    [startDay, endDay] = [endDay, startDay];
+  }
+
+  // 기간을 너무 넓게 잡으면(1년 초과) 그래프도 의미 없고 쿼리 부담만 커지므로 최대 1년으로 제한
+  const MAX_RANGE_DAYS = 366;
+  if (daysBetweenDateStrings(startDay, endDay) > MAX_RANGE_DAYS) {
+    startDay = addDaysToDateString(endDay, -MAX_RANGE_DAYS);
+  }
+
+  // table은 위 allowlist(STATS_METRICS)에서만 나온 값이라 사용자 입력이 직접 SQL에 꽂히지 않음 -
+  // 날짜 범위($1, $2)는 파라미터 바인딩으로 전달. generate_series로 데이터 없는 날짜도 0건으로 채움.
+  const rows = await prisma.$queryRawUnsafe(
+    `SELECT gs::date AS day, COALESCE(c.count, 0)::int AS count
+     FROM generate_series($1::date, $2::date, interval '1 day') AS gs
+     LEFT JOIN LATERAL (
+       SELECT COUNT(*)::int AS count
+       FROM ${table}
+       WHERE (("createdAt" AT TIME ZONE 'Asia/Seoul')::date) = gs::date
+     ) c ON true
+     ORDER BY gs ASC`,
+    startDay,
+    endDay,
+  );
+
+  // Prisma 쿼리 엔진이 date 컬럼을 Date 객체로 주는지 문자열로 주는지 환경에 따라 다를 수 있어서 둘 다 대응
+  const days = rows.map((r) => ({
+    date: r.day instanceof Date ? r.day.toISOString().slice(0, 10) : String(r.day).slice(0, 10),
+    count: r.count,
+  }));
+  const total = days.reduce((sum, d) => sum + d.count, 0);
+
+  return res.json({ metric, start: startDay, end: endDay, total, days });
+}
+
 module.exports = {
   getOverview,
+  getDailyStats,
   listUsers, suspendUser, unsuspendUser, deleteUser,
   listReports, resolveReport,
   listFeedPosts, deleteFeedPost,

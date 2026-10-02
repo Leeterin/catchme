@@ -195,6 +195,7 @@
 
   // ---------- 대시보드 ----------
   async function loadDashboard(){
+    loadStatsChart();
     const grid = document.getElementById('statGrid');
     grid.innerHTML = '<div class="empty-state">불러오는 중...</div>';
     try {
@@ -229,6 +230,63 @@
       grid.innerHTML = `<div class="empty-state">통계를 불러오지 못했어요: ${escapeHtml(err.message)}</div>`;
     }
   }
+
+  // ---------- 대시보드 그래프 (일별 추이) ----------
+  // 날짜 입력칸은 처음 한 번만 기본값(최근 30일)을 채워넣고, 그 다음부턴 사용자가 고른 기간을 유지함
+  function initStatsDateInputs(){
+    const startInput = document.getElementById('statsStartInput');
+    const endInput = document.getElementById('statsEndInput');
+    if(startInput.value && endInput.value) return;
+    const end = new Date();
+    const start = new Date(end.getTime() - 29 * 24 * 60 * 60 * 1000);
+    endInput.value = end.toISOString().slice(0, 10);
+    startInput.value = start.toISOString().slice(0, 10);
+  }
+
+  async function loadStatsChart(){
+    initStatsDateInputs();
+    const wrap = document.getElementById('statsChartWrap');
+    wrap.innerHTML = '<div class="empty-state">불러오는 중...</div>';
+    const metric = document.getElementById('statsMetricSelect').value;
+    const start = document.getElementById('statsStartInput').value;
+    const end = document.getElementById('statsEndInput').value;
+    try {
+      const data = await apiRequest(`/admin/stats/daily?metric=${encodeURIComponent(metric)}&start=${start}&end=${end}`);
+      renderStatsChart(data);
+    } catch(err) {
+      wrap.innerHTML = `<div class="empty-state">그래프를 불러오지 못했어요: ${escapeHtml(err.message)}</div>`;
+    }
+  }
+
+  function renderStatsChart(data){
+    const wrap = document.getElementById('statsChartWrap');
+    if(!data.days || data.days.length === 0){
+      wrap.innerHTML = '<div class="empty-state">데이터가 없어요.</div>';
+      return;
+    }
+    const max = Math.max(1, ...data.days.map((d) => d.count));
+    const n = data.days.length;
+    // 날짜가 많으면 라벨이 다 겹쳐서 보이니, 대략 10개 안팎으로만 보이게 간격을 둠
+    const labelEvery = Math.max(1, Math.ceil(n / 10));
+    const bars = data.days.map((d, i) => {
+      const heightPct = Math.round((d.count / max) * 100);
+      const showLabel = (i % labelEvery === 0) || i === n - 1;
+      const label = d.date.slice(5); // "MM-DD"만 표시
+      return `
+        <div class="chart-bar-col" title="${escapeHtml(d.date)} · ${d.count.toLocaleString()}건">
+          <div class="chart-bar" style="height:${Math.max(heightPct, d.count > 0 ? 2 : 0)}%"></div>
+          <div class="chart-bar-label">${showLabel ? escapeHtml(label) : ''}</div>
+        </div>
+      `;
+    }).join('');
+    wrap.innerHTML = `
+      <div class="chart-summary">총 ${data.total.toLocaleString()}건 · ${escapeHtml(data.start)} ~ ${escapeHtml(data.end)}</div>
+      <div class="chart-bars">${bars}</div>
+    `;
+  }
+
+  document.getElementById('statsRefreshBtn').addEventListener('click', loadStatsChart);
+  document.getElementById('statsMetricSelect').addEventListener('change', loadStatsChart);
 
   // ---------- 유저 관리 ----------
   let userPage = 1;

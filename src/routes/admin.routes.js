@@ -3,6 +3,7 @@ const { requireAuth } = require('../middleware/auth.middleware');
 const { requireAdmin } = require('../middleware/admin.middleware');
 const {
   getOverview,
+  getDailyStats,
   listUsers, suspendUser, unsuspendUser, deleteUser,
   listReports, resolveReport,
   listFeedPosts, deleteFeedPost,
@@ -17,6 +18,7 @@ const router = express.Router();
 router.use(requireAuth, requireAdmin);
 
 router.get('/overview', getOverview);
+router.get('/stats/daily', getDailyStats);
 
 router.get('/users', listUsers);
 router.post('/users/:id/suspend', suspendUser);
