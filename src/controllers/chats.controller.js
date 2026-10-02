@@ -153,7 +153,11 @@ async function clearAvailabilityInRange(userIds, start, end, client) {
 // 그 부분까지 예약 가능으로 되살리면 안 되므로, 실제로 비어있는 부분만 골라서 되살림
 // (예: 9-10시가 원래 운동이었는데 9-10시로 예약을 걸었다가 취소되면, 9-10시는 그대로 운동으로 남고
 // 예약 가능은 새로 생기지 않아야 함 - 원래 그 시간엔 예약 가능이 아니었으니까)
-async function restoreAvailabilityInRange(userId, start, end, client) {
+async function restoreAvailabilityInRange(userId, start, end, client, options) {
+  const mode = (options && options.mode) || 'auto';
+  // 사용자가 명시적으로 "그냥 삭제하기"를 선택한 경우 - 이 시간은 복원하지 않고 그냥 빈 시간으로 둠
+  if (mode === 'skip') return;
+
   const db = client || prisma;
 
   // 이 범위와 겹치는, 아직 남아있는 다른 바쁨 일정들을 찾음 (지금 취소되는 이 예약 자신의 홀드는
@@ -182,10 +186,23 @@ async function restoreAvailabilityInRange(userId, start, end, client) {
       where: { userId, status: 'AVAILABLE', startTime: seg.end },
     });
 
-    // 양옆에 "예약 가능" 조각이 하나도 없으면, 원래 이 시간은 "예약 가능"이 아니었다는 뜻이므로
+    // 양옆에 "예약 가능" 조각이 하나도 없으면, 보통은 원래 이 시간이 "예약 가능"이 아니었다는 뜻이므로
     // 새로 만들어내지 않고 그냥 빈 시간으로 둠 (버그 수정: 전엔 이 경우에도 무조건 새로 생성해서,
-    // 한 번도 예약 가능으로 설정한 적 없는 시간에 예약 요청만 했다가 취소해도 "예약 가능"이 생겨버렸음)
-    if (!left && !right) continue;
+    // 한 번도 예약 가능으로 설정한 적 없는 시간에 예약 요청만 했다가 취소해도 "예약 가능"이 생겨버렸음).
+    // 단, 정확히 꽉 채워서 예약했다가(남는 조각 없이) 취소하면서 사용자가 "예약 가능으로 남기기"를
+    // 직접 선택한 경우(mode==='force')에는 조각이 없어도 이 구간 전체를 새 "예약 가능"으로 만들어줌.
+    if (!left && !right) {
+      if (mode === 'force') {
+        await db.event.create({
+          data: {
+            userId, status: 'AVAILABLE', eventType: 'available', title: '예약 가능',
+            startTime: seg.start, endTime: seg.end,
+            visibleGroupIds: [], visiblePrivate: false,
+          },
+        });
+      }
+      continue;
+    }
 
     let mergedStart = seg.start, mergedEnd = seg.end;
     let title = '예약 가능', visibleGroupIds = [], visiblePrivate = false;
@@ -747,6 +764,9 @@ async function withdrawReservation(req, res) {
 // POST /api/chats/messages/:messageId/cancel — 확정됐던 예약을 취소 (핀도 함께 제거)
 async function cancelReservationMessage(req, res) {
   const { messageId } = req.params;
+  // restoreAvailability: true면 "예약 가능으로 남기기"(꽉 채운 경우에도 강제 복원),
+  // false면 "그냥 삭제하기"(복원 안 함), 안 보내면(undefined) 기존 휴리스틱 그대로 적용
+  const { restoreAvailability } = req.body || {};
   const message = await prisma.message.findUnique({ where: { id: messageId }, include: { chatRoom: { include: { members: true } } } });
   if (!message || message.type !== 'RESERVATION') {
     return res.status(404).json({ message: '예약을 찾을 수 없어요.' });
@@ -767,9 +787,16 @@ async function cancelReservationMessage(req, res) {
     const linkedEvents = await tx.event.findMany({ where: { sourceMessageId: messageId, isPendingHold: false } });
     if (linkedEvents.length > 0) {
       await tx.event.deleteMany({ where: { id: { in: linkedEvents.map((e) => e.id) } } });
-      // 지운 자리에, 그 사람이 원래 "예약 가능"으로 열어뒀던 시간이었다면 다시 예약 가능으로 복원함
+      // 지운 자리에, 그 사람이 원래 "예약 가능"으로 열어뒀던 시간이었다면 다시 예약 가능으로 복원함.
+      // 취소를 요청한 본인의 일정에만 사용자가 고른 선택을 강제 적용하고, 상대방 쪽 일정은
+      // (지금 당장 물어볼 수 없으니) 기존 휴리스틱(auto)을 그대로 따름
       for (const ev of linkedEvents) {
-        await restoreAvailabilityInRange(ev.userId, ev.startTime, ev.endTime, tx);
+        let mode = 'auto';
+        if (ev.userId === req.userId) {
+          if (restoreAvailability === true) mode = 'force';
+          else if (restoreAvailability === false) mode = 'skip';
+        }
+        await restoreAvailabilityInRange(ev.userId, ev.startTime, ev.endTime, tx, { mode });
       }
     }
     return result;
@@ -1124,6 +1151,8 @@ async function voteTimeProposal(req, res) {
 // POST /api/chats/time-proposals/:messageId/cancel — 진행 중인 제안 자체를 취소 (아직 확정 전)
 async function cancelTimeProposal(req, res) {
   const { messageId } = req.params;
+  // 1:1 예약 취소와 동일한 선택권 - 취소를 요청한 본인의 일정에만 적용됨
+  const { restoreAvailability } = req.body || {};
   const message = await prisma.message.findUnique({ where: { id: messageId } });
   if (!message || message.type !== 'TIME_PROPOSAL') {
     return res.status(404).json({ message: '시간 제안을 찾을 수 없어요.' });
@@ -1151,7 +1180,12 @@ async function cancelTimeProposal(req, res) {
       if (linkedEvents.length > 0) {
         await tx.event.deleteMany({ where: { id: { in: linkedEvents.map((e) => e.id) } } });
         for (const ev of linkedEvents) {
-          await restoreAvailabilityInRange(ev.userId, ev.startTime, ev.endTime, tx);
+          let mode = 'auto';
+          if (ev.userId === req.userId) {
+            if (restoreAvailability === true) mode = 'force';
+            else if (restoreAvailability === false) mode = 'skip';
+          }
+          await restoreAvailabilityInRange(ev.userId, ev.startTime, ev.endTime, tx, { mode });
         }
       }
     }
