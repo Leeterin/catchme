@@ -12,6 +12,7 @@ const {
   declineReservation,
   withdrawReservation,
   cancelReservationMessage,
+  restoreAvailabilityChoice,
   sendTimeProposal,
   voteTimeProposal,
   cancelTimeProposal,
@@ -54,6 +55,7 @@ router.post('/messages/:messageId/accept', acceptReservation);
 router.post('/messages/:messageId/decline', declineReservation);
 router.post('/messages/:messageId/withdraw', withdrawReservation);
 router.post('/messages/:messageId/cancel', cancelReservationMessage);
+router.post('/messages/:messageId/restore-availability-choice', restoreAvailabilityChoice);
 router.post('/time-proposals/:messageId/vote', voteTimeProposal);
 router.post('/time-proposals/:messageId/cancel', cancelTimeProposal);
 router.post('/location-suggestions/:messageId/accept', acceptLocationSuggest);

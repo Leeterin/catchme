@@ -806,6 +806,43 @@ async function cancelReservationMessage(req, res) {
   return res.json({ message: serializeMessage(updated) });
 }
 
+// POST /api/chats/messages/:messageId/restore-availability-choice   body: { restore: true }
+// 예약이 취소된 "뒤에", 취소한 사람이든 상대방이든 상관없이 아무 때나 "이 시간 예약 가능으로
+// 남겨둘까요?"를 눌러서 되돌릴 수 있게 함 - 취소하는 바로 그 순간에만 고를 수 있으면 상대방은
+// 영영 그 선택을 할 기회가 없으므로, 채팅방에 남는 "취소됨" 카드에 계속 떠있는 버튼으로 둠
+async function restoreAvailabilityChoice(req, res) {
+  const { messageId } = req.params;
+  const { restore } = req.body || {};
+  const message = await prisma.message.findUnique({ where: { id: messageId }, include: { chatRoom: { include: { members: true } } } });
+  if (!message || message.type !== 'RESERVATION') {
+    return res.status(404).json({ message: '예약을 찾을 수 없어요.' });
+  }
+  const isMember = message.chatRoom.members.some((m) => m.userId === req.userId);
+  if (!isMember) return res.status(403).json({ message: '이 채팅방에 접근할 권한이 없어요.' });
+  if (message.reservationStatus !== 'CANCELLED') {
+    return res.status(409).json({ message: '취소된 예약만 되돌릴 수 있어요.' });
+  }
+  if (!restore) {
+    // "아니오/그대로 두기" - 아무것도 안 바꿈 (버튼을 눌렀다는 것만 응답해주면 됨)
+    return res.json({ ok: true });
+  }
+
+  // 이미 그 시간에 내 "예약 가능"이 겹쳐서 있으면 또 만들지 않음 (버튼을 여러 번 눌러도 안전하게)
+  const existing = await prisma.event.findFirst({
+    where: {
+      userId: req.userId,
+      status: 'AVAILABLE',
+      startTime: { lt: message.reservationEnd },
+      endTime: { gt: message.reservationStart },
+    },
+  });
+  if (!existing) {
+    await restoreAvailabilityInRange(req.userId, message.reservationStart, message.reservationEnd, prisma, { mode: 'force' });
+  }
+
+  return res.json({ ok: true });
+}
+
 // POST /api/chats/:roomId/location-suggestions   body: { place, note?, location?, locationLat?, locationLon?, immediate? }
 // immediate=true면 협의 없이 바로 확정(핀 고정)까지 함 (기존 "바로 이 장소로 확정" 기능)
 async function sendLocationSuggest(req, res) {
@@ -1376,6 +1413,7 @@ module.exports = {
   declineReservation,
   withdrawReservation,
   cancelReservationMessage,
+  restoreAvailabilityChoice,
   sendTimeProposal,
   voteTimeProposal,
   cancelTimeProposal,
