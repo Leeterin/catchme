@@ -1,7 +1,7 @@
 const prisma = require('../lib/prisma');
 
 // 매칭 계산에서 볼 하루 시간 범위 (프론트엔드 HOURS 배열과 정확히 동일하게 9시~23시, 15칸)
-const MATCH_HOURS = Array.from({ length: 15 }, (_, i) => i + 9);
+const MATCH_HOURS = Array.from({ length: 24 }, (_, i) => i); // 2026-10-05: 예약 가능 시간을 24시간 전체(0~23시)로 확장
 
 // "2026-07-29" + 시(hour) 을 "한국 시간 기준" 그 시각으로 정확히 변환.
 // new Date(dateStr) + setHours()는 서버가 어느 시간대로 돌아가는지에 따라 결과가 달라질 수 있어 위험하므로,
