@@ -21,6 +21,8 @@ const {
   declineLocationSuggest,
   withdrawLocationSuggest,
   cancelLocationSuggestMessage,
+  voteLocationSuggest,
+  fixLocationSuggest,
   createGroupRoom,
   leaveRoom,
   markRoomRead,
@@ -68,6 +70,8 @@ router.post('/location-suggestions/:messageId/accept', acceptLocationSuggest);
 router.post('/location-suggestions/:messageId/decline', declineLocationSuggest);
 router.post('/location-suggestions/:messageId/withdraw', withdrawLocationSuggest);
 router.post('/location-suggestions/:messageId/cancel', cancelLocationSuggestMessage);
+router.post('/location-suggestions/:messageId/vote', voteLocationSuggest);
+router.post('/location-suggestions/:messageId/fix', fixLocationSuggest);
 router.post('/:roomId/location-recommend', requestLocationRecommend);
 router.get('/:roomId/location-recommend/active', getActiveLocationRecommend);
 router.post('/location-recommend/:requestId/respond', respondLocationRecommend);

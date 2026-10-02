@@ -73,6 +73,7 @@ model User {
   reportsMade      Report[]
   meetupReviews    MeetupReview[]
   timeProposalVotes TimeProposalVote[]
+  locationSuggestVotes LocationSuggestVote[]
   friendSettingsGiven    FriendSettings[] @relation("SettingsOwner")
   friendSettingsReceived FriendSettings[] @relation("SettingsFriend")
   friendGroups     FriendGroup[]       @relation("GroupOwner")
@@ -251,6 +252,7 @@ model Message {
   locationLat     Float?
   locationLon     Float?
   locationStatus  ReservationStatus? // 같은 상태값(PENDING/CONFIRMED/DECLINED/WITHDRAWN/CANCELLED)을 재사용
+  locationVotes   LocationSuggestVote[] // 장소 후보 투표 (한 방에서 한 사람은 대기 중인 후보 하나에만 투표)
 
   // IMAGE 메시지일 때 - 사진을 base64로 DB에 직접 저장 (프로필 사진과 같은 방식)
   imageUrl String?
@@ -337,6 +339,20 @@ model TimeProposalVote {
 
   @@unique([optionId, userId])
   @@map("time_proposal_votes")
+}
+
+// 장소 제안(LOCATION_SUGGEST) 후보에 누가 투표했는지 - 한 방에서 한 사람은 대기 중인 후보 하나에만 투표
+// (다른 후보에 투표하면 기존 투표는 지워짐). 모두 투표해서 1등이 하나로 갈리면 그 장소로 자동 확정
+model LocationSuggestVote {
+  id        String   @id @default(uuid())
+  messageId String
+  message   Message  @relation(fields: [messageId], references: [id], onDelete: Cascade)
+  userId    String
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  createdAt DateTime @default(now())
+
+  @@unique([messageId, userId])
+  @@map("location_suggest_votes")
 }
 
 // ------------------------------------------------------------

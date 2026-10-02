@@ -76,6 +76,7 @@ function serializeMessage(message) {
         locationLat: message.locationLat,
         locationLon: message.locationLon,
         status: message.locationStatus,
+        voterIds: (message.locationVotes || []).map((v) => v.userId),
       },
     };
   }
@@ -137,6 +138,7 @@ function serializeMessage(message) {
 // (장소 추천 카드의 진행 상태/제출 인원 수도 같이 불러옴 - 다른 타입 메시지에는 그냥 null로 붙음)
 const PROPOSAL_INCLUDE = {
   proposalOptions: { include: { votes: true } },
+  locationVotes: { select: { userId: true } },
   recommendRequest: { select: { status: true, _count: { select: { responses: true } } } },
 };
 
@@ -873,6 +875,53 @@ async function restoreAvailabilityChoice(req, res) {
   return res.json({ ok: true });
 }
 
+// 장소 제안 하나를 확정 - 장소 핀을 이걸로 바꾸고, 같은 방에서 아직 대기 중이던 다른 후보들은 마감(DECLINED) 처리.
+// (투표로 정해졌든, 투표 없이 픽스했든, 1:1에서 수락했든 결과는 같음) 반드시 트랜잭션(tx) 안에서 호출
+async function confirmLocationSuggestionTx(tx, message) {
+  await tx.message.update({ where: { id: message.id }, data: { locationStatus: 'CONFIRMED' } });
+  // 날짜 없이 "장소만" 고정해두던 예전 핀이 있으면 지우고 이번 걸로 새로 고정함 (안 그러면 이 방에
+  // 장소 핀이 여러 개 쌓여서, 상단 고정 영역에 예전 장소들이 유령처럼 계속 같이 떠 있게 됨)
+  await tx.pinnedItem.deleteMany({ where: { chatRoomId: message.chatRoomId, dateLabel: null } });
+  await tx.pinnedItem.create({
+    data: {
+      chatRoomId: message.chatRoomId,
+      note: message.locationNote,
+      location: message.locationPlace,
+      locationLat: message.locationLat,
+      locationLon: message.locationLon,
+      sourceMessageId: message.id,
+    },
+  });
+  await tx.message.updateMany({
+    where: { chatRoomId: message.chatRoomId, type: 'LOCATION_SUGGEST', locationStatus: 'PENDING', id: { not: message.id } },
+    data: { locationStatus: 'DECLINED' },
+  });
+  // 예전에 "장소 정하기"로 남겨뒀던 큰 장소 알림 카드가 있었다면, 이제 이 장소로 바뀌었으니 작은 알림으로 접어둠
+  await supersedeOldLocationNotices(tx, message.chatRoomId);
+}
+
+// 바뀐 장소 제안 메시지들을 다시 불러와서 방 사람들에게 알리고, 직렬화한 목록을 돌려줌
+async function broadcastLocationSuggests(chatRoomId, actorId, messageIds) {
+  const messages = await prisma.message.findMany({
+    where: { id: { in: [...new Set(messageIds)] } },
+    include: PROPOSAL_INCLUDE,
+    orderBy: { createdAt: 'asc' },
+  });
+  const serialized = messages.map(serializeMessage);
+  for (const m of serialized) {
+    await notifyRoom(chatRoomId, actorId, 'newMessage', { roomId: chatRoomId, message: m });
+  }
+  return serialized;
+}
+
+async function pendingLocationSuggestIds(chatRoomId) {
+  const rows = await prisma.message.findMany({
+    where: { chatRoomId, type: 'LOCATION_SUGGEST', locationStatus: 'PENDING' },
+    select: { id: true },
+  });
+  return rows.map((r) => r.id);
+}
+
 // POST /api/chats/:roomId/location-suggestions   body: { place, note?, location?, locationLat?, locationLon?, immediate? }
 // immediate=true면 협의 없이 바로 확정(핀 고정)까지 함 (기존 "바로 이 장소로 확정" 기능)
 async function sendLocationSuggest(req, res) {
@@ -920,27 +969,11 @@ async function sendLocationSuggest(req, res) {
   // "장소 픽스"인데 같은 장소로 이미 대기 중인 제안이 있으면, 새 메시지를 또 만들지 않고
   // 그 제안 메시지를 그대로 확정 처리함 (채팅에 "제안" 카드와 "픽스" 카드가 중복으로 남지 않게)
   if (immediate && pendingForPlace) {
-    const confirmedMessage = await prisma.$transaction(async (tx) => {
-      const updated = await tx.message.update({
-        where: { id: pendingForPlace.id },
-        data: { locationStatus: 'CONFIRMED' },
-      });
-      await tx.pinnedItem.deleteMany({ where: { chatRoomId: roomId, dateLabel: null } });
-      await tx.pinnedItem.create({
-        data: {
-          chatRoomId: roomId,
-          note: updated.locationNote,
-          location: updated.locationPlace,
-          locationLat: updated.locationLat,
-          locationLon: updated.locationLon,
-          sourceMessageId: updated.id,
-        },
-      });
-      await supersedeOldLocationNotices(tx, roomId);
-      return updated;
-    });
-    await notifyRoom(roomId, req.userId, 'newMessage', { roomId, message: serializeMessage(confirmedMessage) });
-    return res.status(201).json({ message: serializeMessage(confirmedMessage) });
+    const affected = await pendingLocationSuggestIds(roomId);
+    await prisma.$transaction((tx) => confirmLocationSuggestionTx(tx, pendingForPlace));
+    const updatedMessages = await broadcastLocationSuggests(roomId, req.userId, affected);
+    const confirmedMessage = updatedMessages.find((m) => m.id === pendingForPlace.id);
+    return res.status(201).json({ message: confirmedMessage, updatedMessages });
   }
 
   const message = await prisma.message.create({
@@ -958,23 +991,11 @@ async function sendLocationSuggest(req, res) {
   });
 
   if (immediate) {
-    await prisma.$transaction(async (tx) => {
-      // 날짜 없이 "장소만" 고정해두던 예전 핀이 있으면 지우고 이번 걸로 새로 고정함 (안 그러면 이 방에
-      // 장소 핀이 여러 개 쌓여서, 상단 고정 영역에 예전 장소들이 유령처럼 계속 같이 떠 있게 됨)
-      await tx.pinnedItem.deleteMany({ where: { chatRoomId: roomId, dateLabel: null } });
-      await tx.pinnedItem.create({
-        data: {
-          chatRoomId: roomId,
-          note: message.locationNote,
-          location: message.locationPlace,
-          locationLat: message.locationLat,
-          locationLon: message.locationLon,
-          sourceMessageId: message.id,
-        },
-      });
-      // 예전에 "장소 정하기"로 남겨뒀던 큰 장소 알림 카드가 있었다면, 이제 이 장소로 바뀌었으니 작은 알림으로 접어둠
-      await supersedeOldLocationNotices(tx, roomId);
-    });
+    // 바로 확정이면 대기 중이던 다른 후보들도 마감되니 같이 알림
+    const affected = await pendingLocationSuggestIds(roomId);
+    await prisma.$transaction((tx) => confirmLocationSuggestionTx(tx, message));
+    const updatedMessages = await broadcastLocationSuggests(roomId, req.userId, [message.id, ...affected]);
+    return res.status(201).json({ message: updatedMessages.find((m) => m.id === message.id), updatedMessages });
   }
 
   await notifyRoom(roomId, req.userId, 'newMessage', { roomId, message: serializeMessage(message) });
@@ -1010,30 +1031,104 @@ async function respondToLocationSuggest(req, res, status) {
   if (count === 0) {
     return res.status(409).json({ message: '이미 처리된 제안이에요.' });
   }
-  const updated = await prisma.message.findUnique({ where: { id: messageId } });
-
+  const affected = [messageId];
   if (status === 'CONFIRMED') {
-    await prisma.$transaction(async (tx) => {
-      // 날짜 없이 "장소만" 고정해두던 예전 핀이 있으면 지우고 이번에 수락된 장소로 새로 고정함 (안 그러면
-      // 이 방에 장소 핀이 여러 개 쌓여서, 상단 고정 영역에 예전 장소들이 유령처럼 계속 같이 떠 있게 됨)
-      await tx.pinnedItem.deleteMany({ where: { chatRoomId: message.chatRoomId, dateLabel: null } });
-      await tx.pinnedItem.create({
-        data: {
-          chatRoomId: message.chatRoomId,
-          note: message.locationNote,
-          location: message.locationPlace,
-          locationLat: message.locationLat,
-          locationLon: message.locationLon,
-          sourceMessageId: message.id,
-        },
-      });
-      // 예전에 "장소 정하기"로 남겨뒀던 큰 장소 알림 카드가 있었다면, 이제 이 장소로 바뀌었으니 작은 알림으로 접어둠
-      await supersedeOldLocationNotices(tx, message.chatRoomId);
-    });
+    affected.push(...(await pendingLocationSuggestIds(message.chatRoomId)));
+    await prisma.$transaction((tx) => confirmLocationSuggestionTx(tx, message));
   }
 
-  await notifyRoom(message.chatRoomId, req.userId, 'newMessage', { roomId: message.chatRoomId, message: serializeMessage(updated) });
-  return res.json({ message: serializeMessage(updated) });
+  const updatedMessages = await broadcastLocationSuggests(message.chatRoomId, req.userId, affected);
+  return res.json({ message: updatedMessages.find((m) => m.id === messageId), updatedMessages });
+}
+
+// POST /api/chats/location-suggestions/:messageId/vote — 장소 후보에 투표(다시 누르면 투표 취소).
+// 한 방에서 한 사람은 대기 중인 후보 하나에만 투표하고, 방 사람 모두 투표했는데 1등이 하나면 그 장소로 자동 확정
+async function voteLocationSuggest(req, res) {
+  const { messageId } = req.params;
+  const message = await prisma.message.findUnique({ where: { id: messageId } });
+  if (!message || message.type !== 'LOCATION_SUGGEST') {
+    return res.status(404).json({ message: '장소 제안을 찾을 수 없어요.' });
+  }
+  if (!(await assertMembership(message.chatRoomId, req.userId))) {
+    return res.status(403).json({ message: '이 채팅방에 접근할 권한이 없어요.' });
+  }
+  if (message.locationStatus !== 'PENDING') {
+    return res.status(409).json({ message: '투표가 끝난 장소예요.' });
+  }
+  const roomId = message.chatRoomId;
+  const affected = await pendingLocationSuggestIds(roomId);
+
+  const existing = await prisma.locationSuggestVote.findUnique({
+    where: { messageId_userId: { messageId, userId: req.userId } },
+  });
+  if (existing) {
+    await prisma.locationSuggestVote.delete({ where: { id: existing.id } });
+  } else {
+    await prisma.$transaction([
+      prisma.locationSuggestVote.deleteMany({
+        where: { userId: req.userId, message: { chatRoomId: roomId, type: 'LOCATION_SUGGEST', locationStatus: 'PENDING' } },
+      }),
+      prisma.locationSuggestVote.create({ data: { messageId, userId: req.userId } }),
+    ]);
+
+    // 모두 투표했는지 확인 - 1등이 하나로 갈리면 자동 확정 (동점이면 그대로 두고 누군가 픽스하게 함)
+    const [memberCount, votes] = await Promise.all([
+      prisma.chatRoomMember.count({ where: { chatRoomId: roomId } }),
+      prisma.locationSuggestVote.findMany({
+        where: { message: { chatRoomId: roomId, type: 'LOCATION_SUGGEST', locationStatus: 'PENDING' } },
+        select: { messageId: true, userId: true },
+      }),
+    ]);
+    if (memberCount > 1 && new Set(votes.map((v) => v.userId)).size >= memberCount) {
+      const counts = {};
+      votes.forEach((v) => { counts[v.messageId] = (counts[v.messageId] || 0) + 1; });
+      const ranked = Object.entries(counts).sort((a, b) => b[1] - a[1]);
+      if (ranked.length === 1 || ranked[0][1] > ranked[1][1]) {
+        const winner = await prisma.message.findUnique({ where: { id: ranked[0][0] } });
+        await prisma.$transaction(async (tx) => {
+          // 거의 동시에 마지막 표가 두 번 들어와도 한 번만 확정되게, 아직 PENDING일 때만 진행
+          const { count } = await tx.message.updateMany({
+            where: { id: winner.id, locationStatus: 'PENDING' },
+            data: { locationStatus: 'CONFIRMED' },
+          });
+          if (count) await confirmLocationSuggestionTx(tx, winner);
+        });
+      }
+    }
+  }
+
+  const updatedMessages = await broadcastLocationSuggests(roomId, req.userId, affected);
+  return res.json({ message: updatedMessages.find((m) => m.id === messageId), updatedMessages });
+}
+
+// POST /api/chats/location-suggestions/:messageId/fix — 투표 없이 이 장소로 바로 확정 (방 사람 누구나)
+async function fixLocationSuggest(req, res) {
+  const { messageId } = req.params;
+  const message = await prisma.message.findUnique({ where: { id: messageId } });
+  if (!message || message.type !== 'LOCATION_SUGGEST') {
+    return res.status(404).json({ message: '장소 제안을 찾을 수 없어요.' });
+  }
+  if (!(await assertMembership(message.chatRoomId, req.userId))) {
+    return res.status(403).json({ message: '이 채팅방에 접근할 권한이 없어요.' });
+  }
+  if (message.locationStatus !== 'PENDING') {
+    return res.status(409).json({ message: '이미 처리된 제안이에요.' });
+  }
+  const affected = await pendingLocationSuggestIds(message.chatRoomId);
+  // 거의 동시에 두 사람이 픽스해도 한 번만 확정되게, PENDING일 때만 진행
+  const confirmed = await prisma.$transaction(async (tx) => {
+    const { count } = await tx.message.updateMany({
+      where: { id: messageId, locationStatus: 'PENDING' },
+      data: { locationStatus: 'CONFIRMED' },
+    });
+    if (!count) return false;
+    await confirmLocationSuggestionTx(tx, message);
+    return true;
+  });
+  if (!confirmed) return res.status(409).json({ message: '이미 처리된 제안이에요.' });
+
+  const updatedMessages = await broadcastLocationSuggests(message.chatRoomId, req.userId, affected);
+  return res.json({ message: updatedMessages.find((m) => m.id === messageId), updatedMessages });
 }
 
 // POST /api/chats/location-suggestions/:messageId/withdraw — 보낸 사람이 대기중인 제안을 스스로 취소
@@ -1719,6 +1814,8 @@ module.exports = {
   declineLocationSuggest,
   withdrawLocationSuggest,
   cancelLocationSuggestMessage,
+  voteLocationSuggest,
+  fixLocationSuggest,
   createGroupRoom,
   leaveRoom,
   markRoomRead,
