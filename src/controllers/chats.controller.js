@@ -182,6 +182,11 @@ async function restoreAvailabilityInRange(userId, start, end, client) {
       where: { userId, status: 'AVAILABLE', startTime: seg.end },
     });
 
+    // 양옆에 "예약 가능" 조각이 하나도 없으면, 원래 이 시간은 "예약 가능"이 아니었다는 뜻이므로
+    // 새로 만들어내지 않고 그냥 빈 시간으로 둠 (버그 수정: 전엔 이 경우에도 무조건 새로 생성해서,
+    // 한 번도 예약 가능으로 설정한 적 없는 시간에 예약 요청만 했다가 취소해도 "예약 가능"이 생겨버렸음)
+    if (!left && !right) continue;
+
     let mergedStart = seg.start, mergedEnd = seg.end;
     let title = '예약 가능', visibleGroupIds = [], visiblePrivate = false;
     if (left) {
