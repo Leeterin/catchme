@@ -1617,6 +1617,52 @@ async function getLocationRecommendStatus(req, res) {
   });
 }
 
+// GET /api/chats/:roomId/location-recommend/active
+// 이 방에서 지금 진행 중인(출발지 모으는 중) 장소 추천 - 채팅방 상단 "진행 중인 장소 추천" 바/시트용.
+// 숫자(진행 상황)와 내 제출 여부만 돌려주고, 누가/어디서 냈는지는 절대 안 돌려줌.
+// 투표형 카드가 생기기 전(예전 버전)에 시작된 요청이라 카드 메시지가 없으면 지금 만들어서 채팅방에도 보이게 함
+async function getActiveLocationRecommend(req, res) {
+  const { roomId } = req.params;
+  if (!(await assertMembership(roomId, req.userId))) {
+    return res.status(403).json({ message: '이 채팅방에 접근할 권한이 없어요.' });
+  }
+  const request = await prisma.locationRecommendRequest.findFirst({
+    where: { chatRoomId: roomId, status: 'COLLECTING' },
+    include: { responses: { select: { userId: true } } },
+    orderBy: { createdAt: 'desc' },
+  });
+  if (!request) return res.json({ active: null });
+
+  let message = await prisma.message.findUnique({ where: { recommendRequestId: request.id }, include: PROPOSAL_INCLUDE });
+  if (!message) {
+    await prisma.message.create({
+      data: {
+        chatRoomId: roomId,
+        senderId: request.requesterId,
+        type: 'LOCATION_RECOMMEND',
+        recommendRequestId: request.id,
+        recommendMode: request.mode,
+      },
+    });
+    message = await broadcastLocationRecommendCard(request.id);
+  }
+
+  const memberCount = await prisma.chatRoomMember.count({ where: { chatRoomId: roomId } });
+  return res.json({
+    active: {
+      requestId: request.id,
+      mode: request.mode,
+      status: request.status,
+      createdAt: request.createdAt,
+      totalMembers: memberCount,
+      respondedCount: request.responses.length,
+      iHaveResponded: request.responses.some((r) => r.userId === req.userId),
+      isRequester: request.requesterId === req.userId,
+      message: message ? serializeMessage(message) : null,
+    },
+  });
+}
+
 // POST /api/chats/location-recommend/:requestId/complete — 일부가 끝내 제출하지 않을 때, 요청자가 지금까지
 // 제출된 인원(2명 이상)만으로 바로 계산하게 강제함
 async function completeLocationRecommendNow(req, res) {
@@ -1686,4 +1732,5 @@ module.exports = {
   getLocationRecommendStatus,
   completeLocationRecommendNow,
   cancelLocationRecommend,
+  getActiveLocationRecommend,
 };

@@ -34,6 +34,7 @@ const {
   getLocationRecommendStatus,
   completeLocationRecommendNow,
   cancelLocationRecommend,
+  getActiveLocationRecommend,
 } = require('../controllers/chats.controller');
 
 const router = express.Router();
@@ -68,6 +69,7 @@ router.post('/location-suggestions/:messageId/decline', declineLocationSuggest);
 router.post('/location-suggestions/:messageId/withdraw', withdrawLocationSuggest);
 router.post('/location-suggestions/:messageId/cancel', cancelLocationSuggestMessage);
 router.post('/:roomId/location-recommend', requestLocationRecommend);
+router.get('/:roomId/location-recommend/active', getActiveLocationRecommend);
 router.post('/location-recommend/:requestId/respond', respondLocationRecommend);
 router.get('/location-recommend/:requestId/status', getLocationRecommendStatus);
 router.post('/location-recommend/:requestId/complete', completeLocationRecommendNow);
