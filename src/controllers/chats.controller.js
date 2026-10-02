@@ -95,11 +95,19 @@ function serializeMessage(message) {
   }
 
   if (message.type === 'LOCATION_RECOMMEND') {
+    // 이 메시지는 카카오톡 투표처럼 "요청한 순간" 그룹방에 카드로 생기고(COLLECTING - 출발지 모으는 중),
+    // 다 모이면 같은 메시지가 결과 카드(COMPLETED)로 바뀜. 요청 정보를 include 안 하고 불러온 경우엔
+    // (예: 채팅 목록 마지막 메시지) 결과값 유무로 상태를 추정함
+    const reqInfo = message.recommendRequest || null;
+    const status = reqInfo ? reqInfo.status : (message.recommendAreaName ? 'COMPLETED' : 'COLLECTING');
     return {
       ...base,
-      // 참가자 개별 출발지/개별 이동시간은 절대 포함하지 않음 - 추천 결과(지역/좌표)와 집계값(평균/최장)만 공개
+      // 참가자 개별 출발지/개별 이동시간은 절대 포함하지 않음 - 추천 결과(지역/좌표)와 집계값(평균/최장)만 공개.
+      // 진행 상황도 "몇 명 냈는지" 숫자만 공개하고, 누가 냈는지는 알려주지 않음
       locationRecommend: {
         requestId: message.recommendRequestId,
+        status,
+        respondedCount: reqInfo && reqInfo._count ? reqInfo._count.responses : null,
         areaName: message.recommendAreaName,
         lat: message.recommendLat,
         lon: message.recommendLon,
@@ -126,7 +134,11 @@ function serializeMessage(message) {
 }
 
 // TIME_PROPOSAL 메시지를 조회할 때 항상 같이 불러와야 하는 관계
-const PROPOSAL_INCLUDE = { proposalOptions: { include: { votes: true } } };
+// (장소 추천 카드의 진행 상태/제출 인원 수도 같이 불러옴 - 다른 타입 메시지에는 그냥 null로 붙음)
+const PROPOSAL_INCLUDE = {
+  proposalOptions: { include: { votes: true } },
+  recommendRequest: { select: { status: true, _count: { select: { responses: true } } } },
+};
 
 // 일정이 확정(예약 수락/그룹투표 확정)되면, 그 시간과 겹치는 "예약 가능"(AVAILABLE) 표시는 이제 다 찬 거니까 정리해줌.
 // 겹치는 부분만 없애고, 앞뒤로 남는 시간이 있으면 그 부분은 그대로 "예약 가능"으로 다시 남겨둠 (통째로 지우면 관계없는 시간까지 예약 불가 처리되니까)
@@ -1465,33 +1477,51 @@ async function tryFinalizeLocationRecommend(requestId, { force = false } = {}) {
   const result = await computeRecommendation(points, request.mode);
   if (!result) return null;
 
-  const [, message] = await prisma.$transaction([
+  const resultData = {
+    recommendAreaName: result.areaName,
+    recommendLat: result.lat,
+    recommendLon: result.lon,
+    recommendMode: request.mode,
+    recommendAvgMinutes: result.avgMinutes,
+    recommendMaxMinutes: result.maxMinutes,
+    recommendParticipants: result.participantCount,
+  };
+  // 요청할 때 만들어둔 투표형 카드 메시지를 결과 카드로 바꿈 (이 기능 배포 전에 시작된 요청이라 카드가 없으면 새로 만듦)
+  await prisma.$transaction([
     prisma.locationRecommendRequest.update({ where: { id: requestId }, data: { status: 'COMPLETED', completedAt: new Date() } }),
-    prisma.message.create({
-      data: {
+    prisma.message.upsert({
+      where: { recommendRequestId: requestId },
+      update: resultData,
+      create: {
         chatRoomId: request.chatRoomId,
         senderId: request.requesterId,
         type: 'LOCATION_RECOMMEND',
         recommendRequestId: requestId,
-        recommendAreaName: result.areaName,
-        recommendLat: result.lat,
-        recommendLon: result.lon,
-        recommendMode: request.mode,
-        recommendAvgMinutes: result.avgMinutes,
-        recommendMaxMinutes: result.maxMinutes,
-        recommendParticipants: result.participantCount,
+        ...resultData,
       },
     }),
   ]);
 
-  // 다른 메시지 타입들과 똑같이 'newMessage' 하나로만 알림 - 그룹방에 결과 카드가 새 메시지로 도착함
-  await notifyRoom(request.chatRoomId, request.requesterId, 'newMessage', { roomId: request.chatRoomId, message: serializeMessage(message) });
+  return broadcastLocationRecommendCard(requestId);
+}
 
+// 장소 추천 카드 메시지를 최신 상태(진행 인원/결과/취소)로 다시 불러와서, 방 멤버 전원(요청자 포함)에게
+// 'newMessage'로 보냄 - 프론트는 같은 id의 메시지가 오면 기존 카드를 갱신함(시간 투표 카드와 같은 방식)
+async function broadcastLocationRecommendCard(requestId) {
+  const message = await prisma.message.findUnique({ where: { recommendRequestId: requestId }, include: PROPOSAL_INCLUDE });
+  if (!message) return null;
+  const io = getIo();
+  if (io) {
+    const members = await prisma.chatRoomMember.findMany({ where: { chatRoomId: message.chatRoomId }, select: { userId: true } });
+    const payload = { roomId: message.chatRoomId, message: serializeMessage(message) };
+    members.forEach((m) => io.to(`user:${m.userId}`).emit('newMessage', payload));
+  }
   return message;
 }
 
 // POST /api/chats/:roomId/location-recommend   body: { mode, savedLocationId? | address?, lat?, lon? }
-// 그룹방 멤버가 "모임 장소 추천받기"를 시작 - 본인 출발지도 함께 제출해야 함(자기 자신도 참가자이므로)
+// 채팅방 멤버가 "모임 장소 추천받기"를 시작 - 본인 출발지도 함께 제출해야 함(자기 자신도 참가자이므로).
+// 그룹방뿐 아니라 1:1 방에서도 쓸 수 있음(두 사람 출발지 기준으로 추천)
 async function requestLocationRecommend(req, res) {
   const { roomId } = req.params;
   const { mode } = req.body;
@@ -1502,9 +1532,6 @@ async function requestLocationRecommend(req, res) {
   const room = await prisma.chatRoom.findUnique({ where: { id: roomId }, include: { members: true } });
   if (!room || !room.members.some((m) => m.userId === req.userId)) {
     return res.status(403).json({ message: '이 채팅방에 접근할 권한이 없어요.' });
-  }
-  if (!room.isGroup) {
-    return res.status(400).json({ message: '장소 추천은 그룹 채팅방에서만 쓸 수 있어요.' });
   }
   if (room.members.length < 2) {
     return res.status(400).json({ message: '참가자가 2명 이상이어야 추천을 받을 수 있어요.' });
@@ -1526,16 +1553,20 @@ async function requestLocationRecommend(req, res) {
     },
   });
 
-  // 나를 제외한 멤버들에게 "출발지를 입력해주세요" 개인 알림 전송 (그룹방 메시지로 남기지 않음 - 각자 비공개로 입력하는 흐름이라서)
-  const otherIds = room.members.map((m) => m.userId).filter((id) => id !== req.userId);
-  const io = getIo();
-  if (io) {
-    otherIds.forEach((userId) => {
-      io.to(`user:${userId}`).emit('locationRecommendRequested', { roomId, requestId: request.id, mode });
-    });
-  }
+  // 카카오톡 투표처럼 채팅방에 "출발지를 입력해주세요" 카드를 바로 남김 - 이 카드에서 각자 출발지를 내고
+  // (주소는 비공개, 인원 수만 공개), 다 모이면 같은 카드가 결과 카드로 바뀜
+  await prisma.message.create({
+    data: {
+      chatRoomId: roomId,
+      senderId: req.userId,
+      type: 'LOCATION_RECOMMEND',
+      recommendRequestId: request.id,
+      recommendMode: mode,
+    },
+  });
+  const message = await broadcastLocationRecommendCard(request.id);
 
-  return res.status(201).json({ requestId: request.id, mode, status: request.status });
+  return res.status(201).json({ requestId: request.id, mode, status: request.status, message: message ? serializeMessage(message) : null });
 }
 
 // POST /api/chats/location-recommend/:requestId/respond   body: { savedLocationId? | address?, lat?, lon? }
@@ -1560,6 +1591,8 @@ async function respondLocationRecommend(req, res) {
   });
 
   const completedMessage = await tryFinalizeLocationRecommend(requestId);
+  // 아직 다 안 모였으면 카드의 "N/M명 제출" 숫자만 갱신해서 모두에게 보냄
+  if (!completedMessage) await broadcastLocationRecommendCard(requestId);
   return res.json({ submitted: true, completed: !!completedMessage });
 }
 
@@ -1616,6 +1649,7 @@ async function cancelLocationRecommend(req, res) {
   }
   await prisma.locationRecommendRequest.update({ where: { id: requestId }, data: { status: 'CANCELLED' } });
   await notifyRoom(request.chatRoomId, req.userId, 'locationRecommendCancelled', { roomId: request.chatRoomId, requestId });
+  await broadcastLocationRecommendCard(requestId); // 채팅방 카드도 "취소됨"으로 바뀌게
   return res.json({ cancelled: true });
 }
 
