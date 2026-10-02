@@ -86,6 +86,20 @@
     return openModal(Object.assign({ title, desc, withInput: true, confirmLabel: '확인', danger: false }, opts || {}));
   }
 
+  // ---------- 상세 모달 (유저 상세 / 신고 상세에서 공용으로 씀) ----------
+  function openDetailModal(title){
+    document.getElementById('detailModalTitle').textContent = title;
+    document.getElementById('detailModalBody').innerHTML = '<div class="empty-state">불러오는 중...</div>';
+    document.getElementById('detailModalOverlay').classList.add('show');
+  }
+  function closeDetailModal(){
+    document.getElementById('detailModalOverlay').classList.remove('show');
+  }
+  document.getElementById('detailModalCloseBtn').addEventListener('click', closeDetailModal);
+  document.getElementById('detailModalOverlay').addEventListener('click', (e) => {
+    if(e.target.id === 'detailModalOverlay') closeDetailModal();
+  });
+
   // ---------- 로그인 ----------
   function setAuthToken(token){
     authToken = token;
@@ -258,30 +272,104 @@
     }
   }
 
+  const STATS_METRIC_LABEL = { feedPosts: '소식 게시물', users: '신규 가입', meetups: '모임 생성' };
+
+  // 데이터 최댓값을 보기 좋은 반올림 값으로 - 예: 37 -> 40, 420 -> 500, 1250 -> 2000
+  function niceCeil(value){
+    if(value <= 0) return 1;
+    const exp = Math.floor(Math.log10(value));
+    const base = Math.pow(10, exp);
+    const norm = value / base;
+    let niceNorm;
+    if(norm <= 1) niceNorm = 1;
+    else if(norm <= 2) niceNorm = 2;
+    else if(norm <= 5) niceNorm = 5;
+    else niceNorm = 10;
+    return niceNorm * base;
+  }
+
+  // Catmull-Rom -> 3차 베지어 변환으로 부드러운 곡선 경로 생성 (외부 차트 라이브러리 없이 직접 구현)
+  function smoothLinePath(points){
+    if(points.length < 2) return '';
+    const d = [`M ${points[0].x.toFixed(2)} ${points[0].y.toFixed(2)}`];
+    for(let i = 0; i < points.length - 1; i++){
+      const p0 = points[i === 0 ? i : i - 1];
+      const p1 = points[i];
+      const p2 = points[i + 1];
+      const p3 = points[i + 2 < points.length ? i + 2 : i + 1];
+      const cp1x = p1.x + (p2.x - p0.x) / 6;
+      const cp1y = p1.y + (p2.y - p0.y) / 6;
+      const cp2x = p2.x - (p3.x - p1.x) / 6;
+      const cp2y = p2.y - (p3.y - p1.y) / 6;
+      d.push(`C ${cp1x.toFixed(2)} ${cp1y.toFixed(2)}, ${cp2x.toFixed(2)} ${cp2y.toFixed(2)}, ${p2.x.toFixed(2)} ${p2.y.toFixed(2)}`);
+    }
+    return d.join(' ');
+  }
+
   function renderStatsChart(data){
     const wrap = document.getElementById('statsChartWrap');
     if(!data.days || data.days.length === 0){
       wrap.innerHTML = '<div class="empty-state">데이터가 없어요.</div>';
       return;
     }
-    const max = Math.max(1, ...data.days.map((d) => d.count));
+    const W = 640, H = 220;
+    const padL = 42, padR = 12, padT = 14, padB = 26;
+    const plotW = W - padL - padR;
+    const plotH = H - padT - padB;
     const n = data.days.length;
-    // 날짜가 많으면 라벨이 다 겹쳐서 보이니, 대략 10개 안팎으로만 보이게 간격을 둠
-    const labelEvery = Math.max(1, Math.ceil(n / 10));
-    const bars = data.days.map((d, i) => {
-      const heightPct = Math.round((d.count / max) * 100);
+
+    const maxCount = Math.max(...data.days.map((d) => d.count));
+    const niceMax = niceCeil(maxCount || 1);
+
+    const points = data.days.map((d, i) => ({
+      x: padL + (n === 1 ? plotW / 2 : (i / (n - 1)) * plotW),
+      y: padT + plotH - (d.count / niceMax) * plotH,
+      date: d.date,
+      count: d.count,
+    }));
+
+    // 가로 그리드선 5개(0%~100%)와 왼쪽 눈금 숫자
+    const GRID_STEPS = 4;
+    let gridLines = '';
+    let gridLabels = '';
+    for(let s = 0; s <= GRID_STEPS; s++){
+      const ratio = s / GRID_STEPS;
+      const y = padT + plotH - ratio * plotH;
+      const value = Math.round(niceMax * ratio);
+      gridLines += `<line class="chart-axis-line" x1="${padL}" y1="${y.toFixed(2)}" x2="${W - padR}" y2="${y.toFixed(2)}" />`;
+      gridLabels += `<text class="chart-grid-label" x="${padL - 6}" y="${(y + 3).toFixed(2)}" text-anchor="end">${value.toLocaleString()}</text>`;
+    }
+
+    // 날짜가 많으면 x축 라벨이 다 겹치니, 대략 8개 안팎으로만 보이게 간격을 둠
+    const labelEvery = Math.max(1, Math.ceil(n / 8));
+    let xLabels = '';
+    points.forEach((p, i) => {
       const showLabel = (i % labelEvery === 0) || i === n - 1;
-      const label = d.date.slice(5); // "MM-DD"만 표시
-      return `
-        <div class="chart-bar-col" title="${escapeHtml(d.date)} · ${d.count.toLocaleString()}건">
-          <div class="chart-bar" style="height:${Math.max(heightPct, d.count > 0 ? 2 : 0)}%"></div>
-          <div class="chart-bar-label">${showLabel ? escapeHtml(label) : ''}</div>
-        </div>
-      `;
-    }).join('');
+      if(!showLabel) return;
+      xLabels += `<text class="chart-x-label" x="${p.x.toFixed(2)}" y="${H - 6}" text-anchor="middle">${escapeHtml(data.days[i].date.slice(5))}</text>`;
+    });
+
+    const linePath = smoothLinePath(points);
+    const hitCircles = points.map((p) => `
+      <circle class="chart-point-hit" cx="${p.x.toFixed(2)}" cy="${p.y.toFixed(2)}" r="9">
+        <title>${escapeHtml(p.date)} · ${p.count.toLocaleString()}건</title>
+      </circle>
+    `).join('');
+
     wrap.innerHTML = `
+      <div class="chart-legend">
+        <div class="chart-legend-item"><span class="chart-legend-swatch"></span>${escapeHtml(STATS_METRIC_LABEL[data.metric] || data.metric)}</div>
+      </div>
       <div class="chart-summary">총 ${data.total.toLocaleString()}건 · ${escapeHtml(data.start)} ~ ${escapeHtml(data.end)}</div>
-      <div class="chart-bars">${bars}</div>
+      <div class="chart-svg-wrap">
+        <svg viewBox="0 0 ${W} ${H}" preserveAspectRatio="none">
+          ${gridLines}
+          ${gridLabels}
+          <path class="chart-line-path" d="${linePath}" />
+          ${hitCircles}
+          ${xLabels}
+        </svg>
+      </div>
     `;
   }
 
@@ -312,6 +400,7 @@
               ${u.isSuspended && u.suspendedReason ? `<div class="row-sub" style="color:var(--danger);">정지 사유: ${escapeHtml(u.suspendedReason)}</div>` : ''}
             </div>
             <div class="row-actions">
+              <button data-action="detail">상세보기</button>
               ${u.isSuspended
                 ? `<button class="ok" data-action="unsuspend">정지 해제</button>`
                 : `<button class="danger" data-action="suspend">정지</button>`}
@@ -327,12 +416,51 @@
     }
   }
 
+  async function showUserDetail(id){
+    openDetailModal('유저 상세');
+    const body = document.getElementById('detailModalBody');
+    try {
+      const data = await apiRequest(`/admin/users/${id}`);
+      const u = data.user;
+      body.innerHTML = `
+        <div class="detail-section">
+          <div class="detail-row-title">
+            ${escapeHtml(u.name)} <span style="color:var(--text-dim); font-weight:400;">@${escapeHtml(u.username)}</span>
+            ${u.isSuspended ? '<span class="badge suspended">정지됨</span>' : ''}
+          </div>
+          <div class="detail-row-sub">${escapeHtml(u.email)}${u.phone ? ' · ' + escapeHtml(u.phone) : ''} · 가입 ${fmtDate(u.createdAt)}</div>
+          ${u.bio ? `<div class="detail-row-sub">${escapeHtml(u.bio)}</div>` : ''}
+          ${u.isSuspended ? `<div class="detail-row-sub" style="color:var(--danger);">정지 사유: ${escapeHtml(u.suspendedReason || '-')} (${fmtDate(u.suspendedAt)})</div>` : ''}
+        </div>
+        <div class="detail-stat-row">
+          <div class="detail-stat"><div class="n">${u.counts.feedPosts}</div><div class="l">소식 게시물</div></div>
+          <div class="detail-stat"><div class="n">${u.counts.meetupsCreated}</div><div class="l">모임 개설</div></div>
+          <div class="detail-stat"><div class="n">${u.counts.meetupsJoined}</div><div class="l">모임 참여</div></div>
+          <div class="detail-stat"><div class="n">${u.counts.reportsMade}</div><div class="l">신고함</div></div>
+          <div class="detail-stat"><div class="n" style="color:${u.counts.reportsAgainst > 0 ? 'var(--danger)' : 'var(--text)'}">${u.counts.reportsAgainst}</div><div class="l">신고받음</div></div>
+        </div>
+        <div class="detail-subheading">최근 작성한 소식</div>
+        ${data.recentPosts.length ? data.recentPosts.map((p) => `
+          <div class="detail-list-item">[${escapeHtml(p.category || '-')}] ${escapeHtml(p.title || p.note || '(내용 없음)')} · ${fmtDate(p.createdAt)}</div>
+        `).join('') : '<div class="detail-empty">작성한 소식이 없어요.</div>'}
+        <div class="detail-subheading">최근 받은 신고</div>
+        ${data.reportsAgainst.length ? data.reportsAgainst.map((r) => `
+          <div class="detail-list-item">${escapeHtml(r.reason)} · 신고자 @${escapeHtml(r.reporterUsername)} · ${fmtDate(r.createdAt)} ${r.status === 'PENDING' ? '<span class="badge pending">대기중</span>' : ''}</div>
+        `).join('') : '<div class="detail-empty">받은 신고가 없어요.</div>'}
+      `;
+    } catch(err) {
+      body.innerHTML = `<div class="empty-state">${escapeHtml(err.message)}</div>`;
+    }
+  }
+
   function wireUserRowActions(listEl){
     listEl.querySelectorAll('.row').forEach((row) => {
       const id = row.dataset.id;
+      const detailBtn = row.querySelector('[data-action="detail"]');
       const suspendBtn = row.querySelector('[data-action="suspend"]');
       const unsuspendBtn = row.querySelector('[data-action="unsuspend"]');
       const deleteBtn = row.querySelector('[data-action="delete"]');
+      if(detailBtn) detailBtn.addEventListener('click', () => showUserDetail(id));
       if(suspendBtn) suspendBtn.addEventListener('click', async () => {
         const result = await promptModal('계정 정지', '정지 사유를 입력해주세요 (선택 사항, 비워도 돼요).', { placeholder: '예: 반복 신고 접수', confirmLabel: '정지시키기', danger: true });
         if(!result.confirmed) return;
@@ -370,6 +498,7 @@
   // ---------- 신고 처리 ----------
   let reportPage = 1;
   const TARGET_TYPE_LABEL = { FEED_POST: '소식 게시물', MEETUP: '모임', USER: '유저' };
+  const REPORT_STATUS_LABEL = { PENDING: '대기중', REVIEWED: '처리됨', DISMISSED: '반려됨' };
 
   async function loadReports(page){
     reportPage = page || 1;
@@ -395,14 +524,15 @@
                 · ${fmtDate(r.createdAt)}
               </div>
             </div>
-            ${r.status === 'PENDING' ? `
-              <div class="row-actions">
+            <div class="row-actions">
+              <button data-action="detail">상세보기</button>
+              ${r.status === 'PENDING' ? `
                 <button data-action="dismiss">반려</button>
                 ${r.targetType === 'USER'
                   ? `<button class="danger" data-action="suspend-user">유저 정지</button>`
                   : `<button class="danger" data-action="delete-content">콘텐츠 삭제</button>`}
-              </div>
-            ` : ''}
+              ` : ''}
+            </div>
           </div>
         `).join('');
         wireReportRowActions(listEl);
@@ -413,12 +543,66 @@
     }
   }
 
+  async function showReportDetail(id){
+    openDetailModal('신고 상세');
+    const body = document.getElementById('detailModalBody');
+    try {
+      const data = await apiRequest(`/admin/reports/${id}`);
+      const t = data.target;
+      let targetHtml = '<div class="detail-empty">이미 삭제된 콘텐츠예요.</div>';
+      if(t && t.exists){
+        if(t.type === 'FEED_POST'){
+          targetHtml = `
+            <div class="detail-row-title">[${escapeHtml(t.category || '-')}] ${escapeHtml(t.title || '(제목 없음)')}</div>
+            <div class="detail-row-sub">
+              작성자 @${escapeHtml(t.author.username)} · ${fmtDate(t.createdAt)}
+              ${t.location ? ' · ' + escapeHtml(t.location) : ''}${t.rating ? ` · 별점 ${t.rating}` : ''}
+            </div>
+            ${t.note ? `<div class="detail-row-sub">${escapeHtml(t.note)}</div>` : ''}
+            ${t.photoCount ? `<div class="detail-row-sub">사진 ${t.photoCount}장</div>` : ''}
+          `;
+        } else if(t.type === 'MEETUP'){
+          targetHtml = `
+            <div class="detail-row-title">${escapeHtml(t.title)} ${t.cancelled ? '<span class="badge cancelled">취소됨</span>' : ''}</div>
+            <div class="detail-row-sub">개설자 @${escapeHtml(t.creator.username)} · 참여 ${t.participantCount}명 · ${fmtDate(t.createdAt)}</div>
+            ${t.description ? `<div class="detail-row-sub">${escapeHtml(t.description)}</div>` : ''}
+          `;
+        } else if(t.type === 'USER'){
+          targetHtml = `
+            <div class="detail-row-title">
+              ${escapeHtml(t.name)} <span style="color:var(--text-dim); font-weight:400;">@${escapeHtml(t.username)}</span>
+              ${t.isSuspended ? '<span class="badge suspended">정지됨</span>' : ''}
+            </div>
+            ${t.bio ? `<div class="detail-row-sub">${escapeHtml(t.bio)}</div>` : ''}
+          `;
+        }
+      }
+      body.innerHTML = `
+        <div class="detail-section">
+          <div class="detail-row-title">[${escapeHtml(TARGET_TYPE_LABEL[data.targetType] || data.targetType)}] 신고</div>
+          <div class="detail-row-sub">
+            신고자 @${escapeHtml(data.reporter.username)} · ${fmtDate(data.createdAt)}
+            · 상태 ${escapeHtml(REPORT_STATUS_LABEL[data.status] || data.status)}
+          </div>
+          <div class="detail-row-sub">사유: ${escapeHtml(data.reason)}</div>
+          ${data.detail ? `<div class="detail-row-sub">상세 설명: ${escapeHtml(data.detail)}</div>` : ''}
+        </div>
+        <div class="detail-subheading">신고 대상</div>
+        <div class="detail-section">${targetHtml}</div>
+      `;
+    } catch(err) {
+      body.innerHTML = `<div class="empty-state">${escapeHtml(err.message)}</div>`;
+    }
+  }
+
   function wireReportRowActions(listEl){
     listEl.querySelectorAll('.row').forEach((row) => {
       const id = row.dataset.id;
+      const detailBtn = row.querySelector('[data-action="detail"]');
       const dismissBtn = row.querySelector('[data-action="dismiss"]');
       const suspendBtn = row.querySelector('[data-action="suspend-user"]');
       const deleteBtn = row.querySelector('[data-action="delete-content"]');
+      if(detailBtn) detailBtn.addEventListener('click', () => showReportDetail(id));
       if(dismissBtn) dismissBtn.addEventListener('click', async () => {
         const result = await confirmModal('신고 반려', '이 신고를 반려 처리할까요?', { confirmLabel: '반려하기', danger: false });
         if(!result.confirmed) return;

@@ -4,8 +4,8 @@ const { requireAdmin } = require('../middleware/admin.middleware');
 const {
   getOverview,
   getDailyStats,
-  listUsers, suspendUser, unsuspendUser, deleteUser,
-  listReports, resolveReport,
+  listUsers, getUserDetail, suspendUser, unsuspendUser, deleteUser,
+  listReports, getReportDetail, resolveReport,
   listFeedPosts, deleteFeedPost,
   listMeetups, cancelMeetup,
   listAdminLogs,
@@ -21,11 +21,13 @@ router.get('/overview', getOverview);
 router.get('/stats/daily', getDailyStats);
 
 router.get('/users', listUsers);
+router.get('/users/:id', getUserDetail);
 router.post('/users/:id/suspend', suspendUser);
 router.post('/users/:id/unsuspend', unsuspendUser);
 router.delete('/users/:id', deleteUser);
 
 router.get('/reports', listReports);
+router.get('/reports/:id', getReportDetail);
 router.post('/reports/:id/resolve', resolveReport);
 
 router.get('/feed-posts', listFeedPosts);

@@ -514,11 +514,166 @@ async function getDailyStats(req, res) {
   return res.json({ metric, start: startDay, end: endDay, total, days });
 }
 
+// ------------------------------------------------------------
+// 유저 상세보기 - 신고 조사할 때 여러 탭 왔다갔다 안 하고 한 화면에서 보려고 만듦
+// ------------------------------------------------------------
+// GET /api/admin/users/:id
+async function getUserDetail(req, res) {
+  const { id } = req.params;
+
+  const user = await prisma.user.findUnique({
+    where: { id },
+    select: {
+      id: true, email: true, username: true, name: true, bio: true, phone: true,
+      profileImageUrl: true, isSuspended: true, suspendedReason: true, suspendedAt: true,
+      createdAt: true,
+      _count: { select: { feedPosts: true, createdMeetups: true, meetupJoins: true, reportsMade: true } },
+    },
+  });
+  if (!user) return res.status(404).json({ message: '유저를 찾을 수 없어요.' });
+
+  // Report는 신고 대상이 USER/FEED_POST/MEETUP을 다 가리킬 수 있는 polymorphic 구조라
+  // 외래키 관계로 바로 못 가져오고, targetType+targetId로 직접 조회해야 함
+  const [recentPosts, reportsAgainstCount, reportsAgainst] = await Promise.all([
+    prisma.feedPost.findMany({
+      where: { authorId: id },
+      orderBy: { createdAt: 'desc' },
+      take: 5,
+      select: { id: true, title: true, note: true, category: true, createdAt: true },
+    }),
+    prisma.report.count({ where: { targetType: 'USER', targetId: id } }),
+    prisma.report.findMany({
+      where: { targetType: 'USER', targetId: id },
+      orderBy: { createdAt: 'desc' },
+      take: 5,
+      include: { reporter: { select: { username: true } } },
+    }),
+  ]);
+
+  return res.json({
+    user: {
+      id: user.id,
+      email: user.email,
+      username: user.username,
+      name: user.name,
+      bio: user.bio,
+      phone: user.phone,
+      profileImageUrl: user.profileImageUrl,
+      isSuspended: user.isSuspended,
+      suspendedReason: user.suspendedReason,
+      suspendedAt: user.suspendedAt,
+      createdAt: user.createdAt,
+      counts: {
+        feedPosts: user._count.feedPosts,
+        meetupsCreated: user._count.createdMeetups,
+        meetupsJoined: user._count.meetupJoins,
+        reportsMade: user._count.reportsMade,
+        reportsAgainst: reportsAgainstCount,
+      },
+    },
+    recentPosts,
+    reportsAgainst: reportsAgainst.map((r) => ({
+      id: r.id,
+      reason: r.reason,
+      status: r.status,
+      createdAt: r.createdAt,
+      reporterUsername: r.reporter.username,
+    })),
+  });
+}
+
+// ------------------------------------------------------------
+// 신고 상세보기 - 목록에서는 제목만 보이던 신고 대상을 실제 내용까지 자세히 보여줌
+// ------------------------------------------------------------
+// GET /api/admin/reports/:id
+async function getReportDetail(req, res) {
+  const { id } = req.params;
+
+  const report = await prisma.report.findUnique({
+    where: { id },
+    include: { reporter: { select: { id: true, username: true, name: true } } },
+  });
+  if (!report) return res.status(404).json({ message: '신고를 찾을 수 없어요.' });
+
+  let target = { exists: false };
+  if (report.targetType === 'FEED_POST') {
+    const post = await prisma.feedPost.findUnique({
+      where: { id: report.targetId },
+      select: {
+        id: true, title: true, note: true, category: true, location: true, rating: true,
+        photos: true, createdAt: true,
+        author: { select: { id: true, username: true, name: true } },
+      },
+    });
+    if (post) {
+      target = {
+        exists: true,
+        type: 'FEED_POST',
+        id: post.id,
+        title: post.title,
+        note: post.note,
+        category: post.category,
+        location: post.location,
+        rating: post.rating,
+        photoCount: (post.photos || []).length,
+        createdAt: post.createdAt,
+        author: post.author,
+      };
+    }
+  } else if (report.targetType === 'MEETUP') {
+    const meetup = await prisma.meetup.findUnique({
+      where: { id: report.targetId },
+      select: {
+        id: true, title: true, description: true, category: true, location: true,
+        eventDate: true, cancelled: true, createdAt: true,
+        creator: { select: { id: true, username: true, name: true } },
+        _count: { select: { participants: true } },
+      },
+    });
+    if (meetup) {
+      target = {
+        exists: true,
+        type: 'MEETUP',
+        id: meetup.id,
+        title: meetup.title,
+        description: meetup.description,
+        category: meetup.category,
+        location: meetup.location,
+        eventDate: meetup.eventDate,
+        cancelled: meetup.cancelled,
+        createdAt: meetup.createdAt,
+        creator: meetup.creator,
+        participantCount: meetup._count.participants,
+      };
+    }
+  } else if (report.targetType === 'USER') {
+    const user = await prisma.user.findUnique({
+      where: { id: report.targetId },
+      select: { id: true, username: true, name: true, bio: true, isSuspended: true, createdAt: true },
+    });
+    if (user) {
+      target = { exists: true, type: 'USER', ...user };
+    }
+  }
+
+  return res.json({
+    id: report.id,
+    targetType: report.targetType,
+    targetId: report.targetId,
+    reason: report.reason,
+    detail: report.detail,
+    status: report.status,
+    createdAt: report.createdAt,
+    reporter: report.reporter,
+    target,
+  });
+}
+
 module.exports = {
   getOverview,
   getDailyStats,
-  listUsers, suspendUser, unsuspendUser, deleteUser,
-  listReports, resolveReport,
+  listUsers, getUserDetail, suspendUser, unsuspendUser, deleteUser,
+  listReports, getReportDetail, resolveReport,
   listFeedPosts, deleteFeedPost,
   listMeetups, cancelMeetup,
   listAdminLogs,
