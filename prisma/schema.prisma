@@ -405,6 +405,7 @@ model InviteResponse {
   userId    String? // 로그인한 상태로 응답했거나, 나중에 가입해서 연결한 경우
   user      User?      @relation(fields: [userId], references: [id], onDelete: SetNull)
   cells     String[] // 가능한 1시간 칸들 "YYYY-MM-DD|HH"
+  ranges    String[]   @default([]) // 분 단위로 맞춘 가능 시간 "YYYY-MM-DD|HH:MM|HH:MM" (cells의 이어진 칸 묶음마다 하나, 없으면 칸 그대로)
   createdAt DateTime   @default(now())
   updatedAt DateTime   @updatedAt
 

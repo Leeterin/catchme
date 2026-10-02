@@ -46,6 +46,31 @@ function validCellSet(poll, openCells) {
   return new Set([...set].filter((c) => openCells.has(c)));
 }
 
+// "16:45" -> 1005 (5분 단위만, 0~1440)
+function parseHm(s) {
+  const m = /^(\d{2}):(\d{2})$/.exec(String(s || ''));
+  if (!m) return null;
+  const v = Number(m[1]) * 60 + Number(m[2]);
+  return Number(m[2]) < 60 && v % 5 === 0 && v <= 1440 ? v : null;
+}
+
+// 분 단위 가능 시간 "YYYY-MM-DD|HH:MM|HH:MM" 들 중, 고른 칸(cells) 안에 들어가는 것만 남김
+function cleanRanges(raw, cells) {
+  const cellSet = new Set(cells);
+  const out = new Set();
+  (Array.isArray(raw) ? raw : []).slice(0, 400).forEach((r) => {
+    const [date, a, b] = String(r).split('|');
+    const s = parseHm(a);
+    const e = parseHm(b);
+    if (!isValidDateStr(date) || s === null || e === null || s >= e) return;
+    for (let h = Math.floor(s / 60); h < Math.ceil(e / 60); h++) {
+      if (!cellSet.has(`${date}|${pad2(h)}`)) return;
+    }
+    out.add(`${date}|${a}|${b}`);
+  });
+  return [...out].sort();
+}
+
 function addDaysStr(dateStr, n) {
   return new Date(new Date(`${dateStr}T00:00:00Z`).getTime() + n * 86400000).toISOString().slice(0, 10);
 }
@@ -165,10 +190,11 @@ function serializePoll(poll, { userId, guestKey, openCells } = {}) {
     responses: (poll.responses || []).map((r) => ({
       name: r.name,
       cells: r.cells,
+      ranges: r.ranges || [],
       isMember: !!r.userId,
       mine: !!mine && r.id === mine.id,
     })),
-    myResponse: mine ? { name: mine.name, cells: mine.cells } : null,
+    myResponse: mine ? { name: mine.name, cells: mine.cells, ranges: mine.ranges || [] } : null,
     createdAt: poll.createdAt,
   };
 }
@@ -325,7 +351,8 @@ async function getInvite(req, res) {
   }
 }
 
-// POST /api/invites/:token/respond  { guestKey, name, cells }  (로그인 없이도 가능)
+// POST /api/invites/:token/respond  { guestKey, name, cells, ranges? }  (로그인 없이도 가능)
+// ranges는 분 단위로 맞춘 시간 (예: 16시 칸을 골랐지만 실제로는 16:45부터) - 없으면 칸 그대로
 async function respondInvite(req, res) {
   try {
     const poll = await findPollByToken(req.params.token);
@@ -349,6 +376,8 @@ async function respondInvite(req, res) {
       return res.status(400).json({ message: openCells ? '고른 시간이 이제 안 돼요. 다시 골라주세요.' : '가능한 시간을 하나 이상 골라주세요.' });
     }
 
+    const ranges = cleanRanges(req.body.ranges, cells);
+
     const existing = findMyResponse(poll, { userId: req.userId, guestKey });
     if (!existing && poll.responses.length >= MAX_RESPONSES) {
       return res.status(400).json({ message: '응답 인원이 가득 찼어요.' });
@@ -357,11 +386,11 @@ async function respondInvite(req, res) {
     if (existing) {
       await prisma.inviteResponse.update({
         where: { id: existing.id },
-        data: { name, cells, ...(req.userId && !existing.userId ? { userId: req.userId } : {}) },
+        data: { name, cells, ranges, ...(req.userId && !existing.userId ? { userId: req.userId } : {}) },
       });
     } else {
       await prisma.inviteResponse.create({
-        data: { pollId: poll.id, guestKey, name, cells, userId: req.userId || null },
+        data: { pollId: poll.id, guestKey, name, cells, ranges, userId: req.userId || null },
       });
     }
 
@@ -379,7 +408,8 @@ async function respondInvite(req, res) {
   }
 }
 
-// POST /api/invites/:token/confirm  { date, startHour, endHour }  (만든 사람만)
+// POST /api/invites/:token/confirm  { date, startHour, endHour, startMin?, endMin? }  (만든 사람만)
+// startMin/endMin(하루 중 몇 분, 5분 단위)이 있으면 그걸로 확정 (예: 16:45~19:00)
 async function confirmInvite(req, res) {
   try {
     const poll = await findPollByToken(req.params.token);
@@ -390,13 +420,16 @@ async function confirmInvite(req, res) {
     const date = String(req.body.date || '');
     const startHour = parseInt(req.body.startHour, 10);
     const endHour = parseInt(req.body.endHour, 10);
+    const hasMin = req.body.startMin !== undefined && req.body.endMin !== undefined;
+    const startMin = hasMin ? parseInt(req.body.startMin, 10) : startHour * 60;
+    const endMin = hasMin ? parseInt(req.body.endMin, 10) : endHour * 60;
     if (!poll.dates.includes(date)) return res.status(400).json({ message: '후보에 없는 날짜예요.' });
-    if (!(startHour >= poll.startHour && endHour <= poll.endHour && startHour < endHour)) {
+    if (!(startMin % 5 === 0 && endMin % 5 === 0 && startMin >= poll.startHour * 60 && endMin <= poll.endHour * 60 && startMin < endMin)) {
       return res.status(400).json({ message: '시간 범위가 올바르지 않아요.' });
     }
 
-    const confirmedStart = kstDate(date, startHour);
-    const confirmedEnd = kstDate(date, endHour);
+    const confirmedStart = kstDate(date, startMin / 60);
+    const confirmedEnd = kstDate(date, endMin / 60);
 
     const result = await prisma.$transaction(async (tx) => {
       const changed = await tx.invitePoll.updateMany({
