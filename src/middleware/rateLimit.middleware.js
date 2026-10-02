@@ -67,7 +67,17 @@ const usernameCheckLimiter = rateLimit({
   message: { message: '요청이 너무 많아요. 잠시 후 다시 시도해주세요.' },
 });
 
+// 약속 초대 링크 - 로그인 없이 쓸 수 있는 응답/생성이라 따로 제한. IP 하나당 10분에 30번까지만
+const inviteLimiter = rateLimit({
+  windowMs: 10 * 60 * 1000,
+  limit: 30,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { message: '너무 자주 시도하고 있어요. 잠시 후 다시 시도해주세요.' },
+});
+
 module.exports = {
+  inviteLimiter,
   loginLimiter,
   signupLimiter,
   passwordResetLimiter,

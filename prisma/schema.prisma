@@ -74,6 +74,8 @@ model User {
   meetupReviews    MeetupReview[]
   timeProposalVotes TimeProposalVote[]
   locationSuggestVotes LocationSuggestVote[]
+  invitePolls          InvitePoll[]
+  inviteResponses      InviteResponse[]
   friendSettingsGiven    FriendSettings[] @relation("SettingsOwner")
   friendSettingsReceived FriendSettings[] @relation("SettingsFriend")
   friendGroups     FriendGroup[]       @relation("GroupOwner")
@@ -353,6 +355,55 @@ model LocationSuggestVote {
 
   @@unique([messageId, userId])
   @@map("location_suggest_votes")
+}
+
+// ------------------------------------------------------------
+// InvitePoll (약속 초대 링크) - 만든 사람이 날짜/시간 범위를 정해서 링크를 보내면,
+// 받은 사람은 회원가입 없이 이름만 적고 가능한 시간(1시간 칸)을 골라 제출함.
+// 만든 사람이 시간을 확정하면 그때부터 링크 페이지에서 CATCHME 가입을 권함.
+// ------------------------------------------------------------
+enum InviteStatus {
+  OPEN
+  CONFIRMED
+  CANCELLED
+}
+
+model InvitePoll {
+  id             String       @id @default(uuid())
+  token          String       @unique // 링크에 들어가는 추측 불가능한 값 (?invite=token)
+  creatorId      String
+  creator        User         @relation(fields: [creatorId], references: [id], onDelete: Cascade)
+  title          String
+  dates          String[] // 후보 날짜들 "YYYY-MM-DD" (한국 시간 기준)
+  startHour      Int // 하루 중 고를 수 있는 시작 시각 (0~23)
+  endHour        Int // 끝 시각 (1~24, 이 시각 직전 칸까지)
+  status         InviteStatus @default(OPEN)
+  confirmedStart DateTime?
+  confirmedEnd   DateTime?
+  createdAt      DateTime     @default(now())
+  updatedAt      DateTime     @updatedAt
+
+  responses InviteResponse[]
+
+  @@index([creatorId])
+  @@map("invite_polls")
+}
+
+// 링크로 들어온 사람 한 명의 응답 - 비회원은 브라우저에 저장한 guestKey로 자기 응답을 다시 고칠 수 있음
+model InviteResponse {
+  id        String     @id @default(uuid())
+  pollId    String
+  poll      InvitePoll @relation(fields: [pollId], references: [id], onDelete: Cascade)
+  guestKey  String
+  name      String
+  userId    String? // 로그인한 상태로 응답했거나, 나중에 가입해서 연결한 경우
+  user      User?      @relation(fields: [userId], references: [id], onDelete: SetNull)
+  cells     String[] // 가능한 1시간 칸들 "YYYY-MM-DD|HH"
+  createdAt DateTime   @default(now())
+  updatedAt DateTime   @updatedAt
+
+  @@unique([pollId, guestKey])
+  @@map("invite_responses")
 }
 
 // ------------------------------------------------------------

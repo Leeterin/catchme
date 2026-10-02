@@ -20,4 +20,18 @@ function requireAuth(req, res, next) {
   }
 }
 
-module.exports = { requireAuth };
+// 로그인 없이도 쓸 수 있는 API용 - 유효한 토큰이 있으면 req.userId를 심고, 없거나 잘못됐으면 비회원으로 그냥 통과
+function optionalAuth(req, res, next) {
+  const header = req.headers.authorization || '';
+  const [scheme, token] = header.split(' ');
+  if (scheme === 'Bearer' && token) {
+    try {
+      req.userId = jwt.verify(token, process.env.JWT_SECRET).sub;
+    } catch (err) {
+      // 만료/위조 토큰이면 비회원으로 취급
+    }
+  }
+  next();
+}
+
+module.exports = { requireAuth, optionalAuth };
