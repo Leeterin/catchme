@@ -361,6 +361,20 @@ async function listChatRooms(req, res) {
     },
   });
 
+  // "읽음 표시"를 끈 상대는 언제까지 읽었는지 알려주지 않음 (보낸 메시지에 "읽음"이 안 뜸)
+  const counterpartIds = memberships
+    .filter((m) => !m.chatRoom.isGroup)
+    .map((m) => (m.chatRoom.members.find((mem) => mem.userId !== req.userId) || {}).userId)
+    .filter(Boolean);
+  const receiptOffIds = new Set(
+    counterpartIds.length
+      ? (await prisma.userSettings.findMany({
+          where: { userId: { in: counterpartIds }, chatReadReceipt: false },
+          select: { userId: true },
+        })).map((s) => s.userId)
+      : []
+  );
+
   // 각 방마다 "내가 마지막으로 읽은 시각 이후, 내가 보낸 게 아닌 메시지" 개수를 세서 안읽음 배지에 사용
   const rooms = await Promise.all(
     memberships.map(async (membership) => {
@@ -369,7 +383,8 @@ async function listChatRooms(req, res) {
       const otherMember = room.isGroup ? null : room.members.find((mem) => mem.userId !== req.userId);
       // 사진 원본(base64) 대신 있는지 여부만 - 실제 이미지는 캐싱되는 /api/users/:id/avatar 로 따로 받음
       const other = otherMember ? { ...otherMember.user, hasAvatar: !!otherMember.user.profileImageUrl, profileImageUrl: undefined } : null;
-      const otherLastReadAt = otherMember ? otherMember.lastReadAt : null; // 상대방이 언제까지 읽었는지 - 보낸 메시지의 "읽음" 표시에 씀
+      // 상대방이 언제까지 읽었는지 - 보낸 메시지의 "읽음" 표시에 씀 (상대가 읽음 표시를 껐으면 null)
+      const otherLastReadAt = otherMember && !receiptOffIds.has(otherMember.userId) ? otherMember.lastReadAt : null;
       const lastMessage = room.messages[0] || null;
 
       const unreadCount = await prisma.message.count({
@@ -419,7 +434,11 @@ async function markRoomRead(req, res) {
     data: { lastReadAt: readAt },
   });
   // 방의 다른 멤버들한테 "이 사람이 여기까지 읽었어요"를 실시간으로 알려줘서, 보낸 메시지 옆 "읽음" 표시가 바로 바뀌게 함
-  await notifyRoom(roomId, req.userId, 'roomRead', { roomId, userId: req.userId, lastReadAt: readAt });
+  // ("읽음 표시"를 끈 사람이면 내 안읽음 개수만 0으로 만들고 상대에게는 알리지 않음)
+  const mySettings = await prisma.userSettings.findUnique({ where: { userId: req.userId } });
+  if (!mySettings || mySettings.chatReadReceipt !== false) {
+    await notifyRoom(roomId, req.userId, 'roomRead', { roomId, userId: req.userId, lastReadAt: readAt });
+  }
   return res.json({ ok: true });
 }
 
@@ -482,6 +501,25 @@ async function getOrCreateDirectRoom(req, res) {
       await prisma.chatRoomMember.create({ data: { chatRoomId: existing.id, userId: req.userId } });
     }
     return res.json({ roomId: existing.id, created: false });
+  }
+
+  // 새 1:1 방을 처음 여는 경우에만 - 상대가 "친구가 아닌 사람의 채팅 요청 허용"을 꺼뒀으면(기본값) 친구만 채팅을 시작할 수 있음.
+  // 이미 있던 방은 위에서 그대로 돌려주므로 예전 대화는 계속 이어갈 수 있음
+  const otherSettings = await prisma.userSettings.findUnique({ where: { userId: other.id } });
+  const allowStrangers = !!(otherSettings && otherSettings.privStrangerChat);
+  if (!allowStrangers) {
+    const friendRow = await prisma.friendRequest.findFirst({
+      where: {
+        status: 'ACCEPTED',
+        OR: [
+          { senderId: req.userId, receiverId: other.id },
+          { senderId: other.id, receiverId: req.userId },
+        ],
+      },
+    });
+    if (!friendRow) {
+      return res.status(403).json({ message: `${other.name}님은 친구에게서만 채팅을 받아요. 먼저 친구 요청을 보내보세요.` });
+    }
   }
 
   const room = await prisma.chatRoom.create({
