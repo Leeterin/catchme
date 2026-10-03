@@ -1,3 +1,4 @@
+const prisma = require('../lib/prisma');
 // 프론트엔드(브라우저)는 네이버 검색 API를 직접 못 부르기 때문에(CORS + 키 노출 문제),
 // 여기서 대신 호출해서 결과만 정리해 돌려준다.
 async function searchPlaces(req, res) {
@@ -58,4 +59,55 @@ function stripHtml(str) {
   return (str || '').replace(/<[^>]+>/g, '');
 }
 
-module.exports = { searchPlaces };
+// GET /api/places/stats?kakaoIds=1,2,3&ids=uuid,uuid
+// 카카오맵 목록 카드 등에 "캐치미 ★4.3 · 리뷰 3 · 약속 5번"을 붙이기 위한 캐치미 자체 집계.
+// 결과는 요청한 카카오 id(또는 장소 id)를 키로 돌려줌 - 캐치미에 기록이 없는 곳은 빠짐
+async function getPlaceStats(req, res) {
+  const split = (v) => String(v || '').split(',').map((x) => x.trim()).filter(Boolean).slice(0, 60);
+  const kakaoIds = split(req.query.kakaoIds);
+  const ids = split(req.query.ids);
+  if (!kakaoIds.length && !ids.length) return res.json({ stats: {} });
+
+  const places = await prisma.place.findMany({
+    where: { OR: [
+      ...(kakaoIds.length ? [{ kakaoPlaceId: { in: kakaoIds } }] : []),
+      ...(ids.length ? [{ id: { in: ids } }] : []),
+    ] },
+    select: { id: true, kakaoPlaceId: true },
+  });
+  if (!places.length) return res.json({ stats: {} });
+  const placeIds = places.map((p) => p.id);
+
+  const [events, posts] = await Promise.all([
+    prisma.placeEvent.groupBy({ by: ['placeId', 'type'], where: { placeId: { in: placeIds } }, _count: { _all: true } }),
+    prisma.feedPost.findMany({
+      where: { placeId: { in: placeIds } },
+      select: { placeId: true, rating: true, comments: { select: { rating: true } } },
+    }),
+  ]);
+
+  const stats = {};
+  places.forEach((p) => {
+    const ratings = [];
+    let reviewCount = 0;
+    posts.filter((x) => x.placeId === p.id).forEach((x) => {
+      reviewCount++;
+      if (typeof x.rating === 'number') ratings.push(x.rating);
+      x.comments.forEach((c) => { if (typeof c.rating === 'number') ratings.push(c.rating); });
+    });
+    const count = (type) => (events.find((e) => e.placeId === p.id && e.type === type) || { _count: { _all: 0 } })._count._all;
+    const entry = {
+      placeId: p.id,
+      avgRating: ratings.length ? Math.round((ratings.reduce((a, b) => a + b, 0) / ratings.length) * 10) / 10 : null,
+      ratingCount: ratings.length,
+      reviewCount,
+      confirmCount: count('CONFIRM'),
+      suggestCount: count('SUGGEST'),
+    };
+    if (p.kakaoPlaceId && kakaoIds.includes(p.kakaoPlaceId)) stats[p.kakaoPlaceId] = entry;
+    if (ids.includes(p.id)) stats[p.id] = entry;
+  });
+  return res.json({ stats });
+}
+
+module.exports = { searchPlaces, getPlaceStats };

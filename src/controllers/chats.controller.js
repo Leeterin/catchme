@@ -3,6 +3,7 @@ const { getIo } = require('../lib/socket');
 const { isAllowedImageDataUrl } = require('../lib/validators');
 const { computeRecommendation } = require('../lib/locationRecommend');
 const { pushInBackground } = require('../lib/push');
+const { safeFindOrCreatePlace, recordPlaceEvent } = require('../lib/places');
 
 const MEMBER_USER_SELECT = {
   id: true,
@@ -97,6 +98,7 @@ function serializeMessage(message) {
         location: message.locationAddress,
         locationLat: message.locationLat,
         locationLon: message.locationLon,
+        placeId: message.locationPlaceId || null,
         status: message.locationStatus,
         voterIds: (message.locationVotes || []).map((v) => v.userId),
       },
@@ -111,6 +113,7 @@ function serializeMessage(message) {
         location: message.locationAddress,
         locationLat: message.locationLat,
         locationLon: message.locationLon,
+        placeId: message.locationPlaceId || null,
         pinId: message.locationNote || null, // 이 알림이 어느 핀(PinnedItem)에 속하는지 - locationNote 필드를 링크용으로 재사용함
         superseded: message.locationStatus === 'SUPERSEDED', // 장소가 그 뒤에 또 바뀌어서, 이제 예전 알림이 된 경우
       },
@@ -998,6 +1001,25 @@ async function confirmLocationSuggestionTx(tx, message) {
   await supersedeOldLocationNotices(tx, message.chatRoomId);
 }
 
+// 장소가 확정되면 캐치미 장소 DB에 "확정" 기록을 남김 (트랜잭션이 끝난 뒤 호출 - 기록이 실패해도 확정은 그대로)
+async function recordLocationConfirm(message, userId) {
+  if (!message || !message.locationPlaceId) return;
+  await recordPlaceEvent(prisma, {
+    placeId: message.locationPlaceId, type: 'CONFIRM', userId, chatRoomId: message.chatRoomId, messageId: message.id,
+  });
+}
+
+// 클라이언트가 보낸 장소 부가정보(카카오에서 고른 경우) - 장소 DB에 같은 가게를 찾거나 새로 등록할 때 씀
+function placeInfoFromBody(body, name, address, lat, lon) {
+  return {
+    name, address, lat, lon,
+    kakaoPlaceId: body.kakaoPlaceId,
+    category: body.placeCategory,
+    categoryDetail: body.placeCategoryDetail,
+    phone: body.placePhone,
+  };
+}
+
 // 바뀐 장소 제안 메시지들을 다시 불러와서 방 사람들에게 알리고, 직렬화한 목록을 돌려줌
 async function broadcastLocationSuggests(chatRoomId, actorId, messageIds) {
   const messages = await prisma.message.findMany({
@@ -1069,10 +1091,16 @@ async function sendLocationSuggest(req, res) {
   if (immediate && pendingForPlace) {
     const affected = await pendingLocationSuggestIds(roomId);
     await prisma.$transaction((tx) => confirmLocationSuggestionTx(tx, pendingForPlace));
+    await recordLocationConfirm(pendingForPlace, req.userId);
     const updatedMessages = await broadcastLocationSuggests(roomId, req.userId, affected);
     const confirmedMessage = updatedMessages.find((m) => m.id === pendingForPlace.id);
     return res.status(201).json({ message: confirmedMessage, updatedMessages });
   }
+
+  // 캐치미 장소 DB에서 같은 가게를 찾거나 새로 등록 (좌표가 있을 때만)
+  const lat = typeof locationLat === 'number' ? locationLat : null;
+  const lon = typeof locationLon === 'number' ? locationLon : null;
+  const placeRow = await safeFindOrCreatePlace(prisma, placeInfoFromBody(req.body, trimmedPlace, location, lat, lon));
 
   const message = await prisma.message.create({
     data: {
@@ -1082,17 +1110,20 @@ async function sendLocationSuggest(req, res) {
       locationPlace: trimmedPlace,
       locationNote: note || null,
       locationAddress: location || null,
-      locationLat: typeof locationLat === 'number' ? locationLat : null,
-      locationLon: typeof locationLon === 'number' ? locationLon : null,
+      locationLat: lat,
+      locationLon: lon,
+      locationPlaceId: placeRow ? placeRow.id : null,
       locationStatus: immediate ? 'CONFIRMED' : 'PENDING',
     },
   });
+  await recordPlaceEvent(prisma, { placeId: message.locationPlaceId, type: 'SUGGEST', userId: req.userId, chatRoomId: roomId, messageId: message.id });
   pushToRoom(roomId, req.userId, immediate ? `장소를 ${trimmedPlace}(으)로 정했어요` : `장소로 ${trimmedPlace}을(를) 제안했어요`);
 
   if (immediate) {
     // 바로 확정이면 대기 중이던 다른 후보들도 마감되니 같이 알림
     const affected = await pendingLocationSuggestIds(roomId);
     await prisma.$transaction((tx) => confirmLocationSuggestionTx(tx, message));
+    await recordLocationConfirm(message, req.userId);
     const updatedMessages = await broadcastLocationSuggests(roomId, req.userId, [message.id, ...affected]);
     return res.status(201).json({ message: updatedMessages.find((m) => m.id === message.id), updatedMessages });
   }
@@ -1134,6 +1165,7 @@ async function respondToLocationSuggest(req, res, status) {
   if (status === 'CONFIRMED') {
     affected.push(...(await pendingLocationSuggestIds(message.chatRoomId)));
     await prisma.$transaction((tx) => confirmLocationSuggestionTx(tx, message));
+    await recordLocationConfirm(message, req.userId);
   }
 
   const updatedMessages = await broadcastLocationSuggests(message.chatRoomId, req.userId, affected);
@@ -1184,14 +1216,16 @@ async function voteLocationSuggest(req, res) {
       const ranked = Object.entries(counts).sort((a, b) => b[1] - a[1]);
       if (ranked.length === 1 || ranked[0][1] > ranked[1][1]) {
         const winner = await prisma.message.findUnique({ where: { id: ranked[0][0] } });
-        await prisma.$transaction(async (tx) => {
+        const won = await prisma.$transaction(async (tx) => {
           // 거의 동시에 마지막 표가 두 번 들어와도 한 번만 확정되게, 아직 PENDING일 때만 진행
           const { count } = await tx.message.updateMany({
             where: { id: winner.id, locationStatus: 'PENDING' },
             data: { locationStatus: 'CONFIRMED' },
           });
           if (count) await confirmLocationSuggestionTx(tx, winner);
+          return count > 0;
         });
+        if (won) await recordLocationConfirm(winner, req.userId);
       }
     }
   }
@@ -1225,6 +1259,7 @@ async function fixLocationSuggest(req, res) {
     return true;
   });
   if (!confirmed) return res.status(409).json({ message: '이미 처리된 제안이에요.' });
+  await recordLocationConfirm(message, req.userId);
 
   const updatedMessages = await broadcastLocationSuggests(message.chatRoomId, req.userId, affected);
   return res.json({ message: updatedMessages.find((m) => m.id === messageId), updatedMessages });
@@ -1616,6 +1651,11 @@ async function updatePin(req, res) {
     // 장소가 새로 바뀌면, 이 채팅방에 남아있던 예전 장소 알림들은 지우지 않고 "예전 알림"으로 표시만 바꿔서
     // (작은 "약속 장소가 변경됐어요" 알림으로) 계속 남겨두고, 새 알림 하나만 지금 확정된 장소로 크게 보여줌
     await supersedeOldLocationNotices(prisma, pin.chatRoomId);
+    const place = await safeFindOrCreatePlace(prisma, placeInfoFromBody(
+      req.body, location, nextAddress,
+      typeof locationLat === 'number' ? locationLat : null,
+      typeof locationLon === 'number' ? locationLon : null,
+    ));
     const created = await prisma.message.create({
       data: {
         chatRoomId: pin.chatRoomId,
@@ -1627,8 +1667,10 @@ async function updatePin(req, res) {
         locationLon: typeof locationLon === 'number' ? locationLon : null,
         locationNote: pin.id, // LOCATION_NOTICE에서는 이 필드를 "어느 핀 소속인지" 링크용으로 재사용함
         locationStatus: 'PENDING', // 값을 명시적으로 채워서 null로 안 남게 함 (null이면 다음 번 변경 때 supersede 대상에서 누락됨)
+        locationPlaceId: place ? place.id : null,
       },
     });
+    await recordPlaceEvent(prisma, { placeId: created.locationPlaceId, type: 'CONFIRM', userId: req.userId, chatRoomId: pin.chatRoomId, messageId: created.id });
     noticeMessage = serializeMessage(created);
     await notifyRoom(pin.chatRoomId, req.userId, 'newMessage', { roomId: pin.chatRoomId, message: noticeMessage });
   }

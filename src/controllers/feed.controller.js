@@ -1,5 +1,6 @@
 const crypto = require('crypto');
 const prisma = require('../lib/prisma');
+const { safeFindOrCreatePlace, recordPlaceEvent } = require('../lib/places');
 const { distanceKm } = require('../lib/geo');
 const { isAllowedImageDataUrl } = require('../lib/validators');
 
@@ -91,6 +92,7 @@ function serializePost(post, myUserId, req) {
   const avgRating = allRatings.length > 0 ? allRatings.reduce((sum, r) => sum + r, 0) / allRatings.length : null;
   return {
     id: post.id,
+    placeId: post.placeId || null,
     author: serializeAuthor(post.author),
     category: post.category || (post.place ? post.place.category : null),
     title: post.title || (post.place ? post.place.name : ''),
@@ -183,7 +185,7 @@ async function listFeedPosts(req, res) {
 // POST /api/feed   body: { category, title, note?, rating?, photos?, location?, address?, phone?, lat?, lon?, tags?, fromMeetup? }
 // 게시물을 독립적으로 하나 만듦 (다른 사람 글과 안 묶임)
 async function createFeedPost(req, res) {
-  const { category, title, note, rating, photos, location, address, phone, lat, lon, tags, fromMeetup } = req.body;
+  const { category, title, note, rating, photos, location, address, phone, lat, lon, tags, fromMeetup, kakaoPlaceId, placeCategoryDetail } = req.body;
   if (!category || !category.trim()) {
     return res.status(400).json({ message: '카테고리를 선택해주세요.' });
   }
@@ -198,9 +200,15 @@ async function createFeedPost(req, res) {
   const { valid: validPhotos, error: photoError } = validatePhotos(photos, { requireAtLeastOne: false });
   if (photoError) return res.status(400).json({ message: photoError });
 
+  // 캐치미 장소 DB에서 같은 가게를 찾아 이 리뷰를 연결 (이름이 조금 달라도 같은 곳이면 리뷰가 하나로 모임)
+  const place = await safeFindOrCreatePlace(prisma, {
+    name: title.trim(), lat, lon, address, phone, location, category: category.trim(), kakaoPlaceId, categoryDetail: placeCategoryDetail,
+  });
+
   const post = await prisma.feedPost.create({
     data: {
       authorId: req.userId,
+      placeId: place ? place.id : null,
       category: category.trim(),
       title: title.trim(),
       location: location || null,
@@ -217,6 +225,7 @@ async function createFeedPost(req, res) {
     include: { author: { select: { id: true, username: true, name: true, profileImageUrl: true, reviewNickname: true, reviewAvatarUrl: true } }, likes: true },
   });
 
+  await recordPlaceEvent(prisma, { placeId: post.placeId, type: 'REVIEW', userId: req.userId, postId: post.id });
   return res.status(201).json({ post: serializePost(post, req.userId, req) });
 }
 
@@ -257,6 +266,15 @@ async function updateFeedPost(req, res) {
 
   if (Object.keys(data).length === 0) {
     return res.status(400).json({ message: '변경할 내용이 없어요.' });
+  }
+  // 장소(이름/좌표)를 바꿨으면 연결된 장소도 다시 찾음
+  if (data.title !== undefined || data.lat !== undefined || data.lon !== undefined) {
+    const place = await safeFindOrCreatePlace(prisma, {
+      name: data.title ?? post.title, lat: data.lat ?? post.lat, lon: data.lon ?? post.lon,
+      address: data.address ?? post.address, phone: data.phone ?? post.phone, location: data.location ?? post.location,
+      category: post.category,
+    });
+    if (place && place.id !== post.placeId) data.placeId = place.id;
   }
 
   const updated = await prisma.feedPost.update({

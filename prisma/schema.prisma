@@ -255,6 +255,7 @@ model Message {
   locationLat     Float?
   locationLon     Float?
   locationStatus  ReservationStatus? // 같은 상태값(PENDING/CONFIRMED/DECLINED/WITHDRAWN/CANCELLED)을 재사용
+  locationPlaceId String? // 이 장소가 캐치미 장소 DB(Place)의 어느 곳인지 (LOCATION_SUGGEST / LOCATION_NOTICE)
   locationVotes   LocationSuggestVote[] // 장소 후보 투표 (한 방에서 한 사람은 대기 중인 후보 하나에만 투표)
 
   // IMAGE 메시지일 때 - 사진을 base64로 DB에 직접 저장 (프로필 사진과 같은 방식)
@@ -277,6 +278,7 @@ model Message {
   recommendParticipants Int? // 계산에 참여한 인원 수
 
   @@index([chatRoomId, createdAt])
+  @@index([locationPlaceId])
   @@map("messages")
 }
 
@@ -556,21 +558,49 @@ enum SavedLocationLabel {
 // ------------------------------------------------------------
 // FeedPost (커뮤니티 소식 - 밥집/카페/액티비티 추천 글)
 // ------------------------------------------------------------
-// 장소 - 같은 가게에 대해 여러 사람이 리뷰를 남길 수 있도록, 게시물(리뷰)과 분리된 하나의 실체로 관리함
+// 장소 - 캐치미 자체 장소 DB. 사용자가 실제로 제안/확정/리뷰한 가게만 여기에 등록됨
+// (카카오 장소 정보를 대량으로 쌓지 않음 - 카카오 id는 같은 가게를 알아보는 참조용으로만 저장)
+// 같은 가게 판별: kakaoPlaceId가 같거나, normName(띄어쓰기/대소문자 무시한 이름)이 같고 100m 안이면 같은 곳
 model Place {
   id             String    @id @default(uuid())
   name           String // 상호명 (예: "빽다방 잠실새내점")
-  category       String // "food" | "cafe" | "experience"
+  normName       String    @default("") // 같은 가게 찾기용 이름 (공백/기호 제거, 소문자)
+  category       String // "food" | "cafe" | "experience" | "etc"
+  categoryDetail String? // 세부 업종 (예: "돈까스,우동")
   location       String? // 동네/역 이름 등 사람이 보는 대략적 위치명
+  address        String? // 도로명/지번 주소
+  phone          String?
   lat            Float?
   lon            Float?
+  kakaoPlaceId   String?   @unique // 카카오 장소 id (참조용)
+  source         String    @default("user") // "user"(사용자 입력) | "kakao"(카카오 검색에서 고름) | "public"(공공데이터)
   isSponsored    Boolean   @default(false) // 광고비를 낸 곳 - 목록 맨 위에 노출됨
   sponsoredUntil DateTime? // 광고 노출 종료 시점 (지나면 자동으로 일반 노출로)
   createdAt      DateTime  @default(now())
+  updatedAt      DateTime  @default(now()) @updatedAt
 
   reviews FeedPost[]
+  events  PlaceEvent[]
 
+  @@index([normName])
   @@map("places")
+}
+
+// 장소 행동 기록 - 어느 가게가 약속 장소로 제안/확정/리뷰됐는지 (인기 순위, 광고 효과 측정의 기반)
+model PlaceEvent {
+  id         String   @id @default(uuid())
+  placeId    String
+  place      Place    @relation(fields: [placeId], references: [id], onDelete: Cascade)
+  type       String // "SUGGEST" | "CONFIRM" | "REVIEW"
+  userId     String?
+  chatRoomId String?
+  messageId  String?
+  postId     String?
+  createdAt  DateTime @default(now())
+
+  @@index([placeId, type])
+  @@index([createdAt])
+  @@map("place_events")
 }
 
 // 소식 게시물 - 각자 올린 글이 독립적인 하나의 게시물로 따로 보임 (더 이상 같은 장소끼리 묶지 않음)
@@ -578,8 +608,8 @@ model FeedPost {
   id        String   @id @default(uuid())
   authorId  String
   author    User     @relation(fields: [authorId], references: [id], onDelete: Cascade)
-  placeId   String? // 예전 방식(장소로 묶던 시절)의 흔적 - 새 게시물은 안 씀, 과거 데이터 호환용으로만 남겨둠
-  place     Place?   @relation(fields: [placeId], references: [id], onDelete: Cascade)
+  placeId   String? // 이 리뷰가 어느 장소(Place)에 대한 것인지 - 같은 가게 리뷰를 이름이 달라도 하나로 모음
+  place     Place?   @relation(fields: [placeId], references: [id], onDelete: SetNull) // 장소가 지워져도 리뷰는 남김
   category  String? // "food" | "cafe" | "experience" - 게시물 자체에 직접 저장함
   title     String? // 제목 (상호명 등) - 게시물 자체에 직접 저장함
   location  String? // 동네/역 이름 등
