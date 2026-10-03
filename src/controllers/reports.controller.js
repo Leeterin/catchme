@@ -1,12 +1,16 @@
 const prisma = require('../lib/prisma');
+const { isAllowedImageDataUrl } = require('../lib/validators');
 
 const VALID_TARGET_TYPES = ['FEED_POST', 'MEETUP', 'USER'];
 const BUG_CATEGORIES = ['기능이 안 돼요', '화면이 이상해요', '느리거나 멈춰요', '기타'];
+// 오류 신고 첨부 사진 - 최대 3장, 장당 채팅 사진과 같은 제한(base64 약 500KB)
+const MAX_BUG_IMAGES = 3;
+const MAX_BUG_IMAGE_CHARS = 700000;
 
 // POST /api/reports   body: { targetType, targetId, reason, detail? }
 // 지금은 자동으로 뭔가 처리되진 않고 기록만 남김 (나중에 관리자 화면에서 검토하는 걸 전제로 함)
 async function createReport(req, res) {
-  const { targetType, targetId, reason, detail } = req.body;
+  const { targetType, targetId, reason, detail, images } = req.body;
   // 앱 오류 신고 (흔들어서 신고 / 설정 메뉴) - 대상 콘텐츠가 없으니 targetId는 'APP'으로 고정하고,
   // 설명 + 기기 정보 + 최근 오류 로그를 같이 받아야 해서 detail을 일반 신고보다 길게 허용함
   if (targetType === 'BUG') {
@@ -15,6 +19,16 @@ async function createReport(req, res) {
     if (!text) {
       return res.status(400).json({ message: '어떤 문제가 있었는지 적어주세요.' });
     }
+    const imageList = Array.isArray(images) ? images : [];
+    if (imageList.length > MAX_BUG_IMAGES) {
+      return res.status(400).json({ message: `사진은 최대 ${MAX_BUG_IMAGES}장까지 첨부할 수 있어요.` });
+    }
+    if (imageList.some((img) => !isAllowedImageDataUrl(img))) {
+      return res.status(400).json({ message: '이미지 형식이 올바르지 않아요. (png/jpg/webp/gif만 가능)' });
+    }
+    if (imageList.some((img) => img.length > MAX_BUG_IMAGE_CHARS)) {
+      return res.status(400).json({ message: '사진 용량이 너무 커요. 더 작은 사진을 사용해주세요.' });
+    }
     await prisma.report.create({
       data: {
         reporterId: req.userId,
@@ -22,6 +36,7 @@ async function createReport(req, res) {
         targetId: 'APP',
         reason: category,
         detail: text.slice(0, 6000),
+        images: imageList,
       },
     });
     return res.status(201).json({ message: '오류 신고가 접수됐어요. 고마워요!' });

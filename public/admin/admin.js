@@ -572,6 +572,14 @@
         } else if(t.type === 'BUG'){
           // 오류 신고는 설명 + 기기 정보 + 최근 오류 로그가 여러 줄로 들어있어서 줄바꿈 그대로 보여줌
           targetHtml = `<div class="detail-row-sub" style="white-space:pre-wrap;word-break:break-all;">${escapeHtml(data.detail || '')}</div>`;
+          if(data.images && data.images.length){
+            targetHtml += `
+              <div class="detail-subheading">첨부 사진 (${data.images.length}장)</div>
+              <div class="detail-photo-grid">
+                ${data.images.map((src) => `<img src="${src}" loading="lazy" onclick="window.open(this.src, '_blank')" />`).join('')}
+              </div>
+            `;
+          }
         } else if(t.type === 'USER'){
           targetHtml = `
             <div class="detail-row-title">

@@ -738,6 +738,7 @@ model Report {
   targetId   String
   reason     String
   detail     String?
+  images     String[] @default([]) // 오류 신고(BUG)에 첨부한 사진 - base64 data URL, 최대 3장
   status     String   @default("PENDING") // "PENDING" | "REVIEWED" | "DISMISSED"
   createdAt  DateTime @default(now())
 

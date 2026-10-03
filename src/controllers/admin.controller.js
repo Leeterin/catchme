@@ -206,7 +206,11 @@ async function listReports(req, res) {
       orderBy: { createdAt: 'desc' },
       skip: (page - 1) * limit,
       take: limit,
-      include: { reporter: { select: { id: true, username: true, name: true } } },
+      // 첨부 사진(images)은 용량이 커서 목록에선 빼고 상세보기에서만 내려줌
+      select: {
+        id: true, targetType: true, targetId: true, reason: true, detail: true, status: true, createdAt: true,
+        reporter: { select: { id: true, username: true, name: true } },
+      },
     }),
     prisma.report.count({ where: { status } }),
   ]);
@@ -742,6 +746,7 @@ async function getReportDetail(req, res) {
     targetId: report.targetId,
     reason: report.reason,
     detail: report.detail,
+    images: report.images || [],
     status: report.status,
     createdAt: report.createdAt,
     reporter: report.reporter,
