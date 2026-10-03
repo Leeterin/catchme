@@ -3,6 +3,8 @@
 
   const API_BASE = '/api';
   let authToken = null;
+  let refreshTokenValue = null;
+  let refreshPromise = null;
 
   // ---------- 공용 유틸 ----------
   function escapeHtml(str){
@@ -24,13 +26,36 @@
     toastTimer = setTimeout(() => el.classList.remove('show'), 2400);
   }
 
-  async function apiRequest(path, options){
+  // 액세스 토큰(15분)이 만료되면 리프레시 토큰으로 새로 받아옴 - 동시에 여러 요청이 401을 받아도 한 번만 갱신
+  function refreshAccessToken(){
+    if(!refreshTokenValue) return Promise.resolve(false);
+    if(!refreshPromise){
+      refreshPromise = fetch(API_BASE + '/auth/refresh', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ refreshToken: refreshTokenValue }),
+      }).then(async (res) => {
+        if(!res.ok) return false;
+        const data = await res.json();
+        setAuthToken(data.token, data.refreshToken);
+        return true;
+      }).catch(() => false).finally(() => { refreshPromise = null; });
+    }
+    return refreshPromise;
+  }
+
+  async function apiRequest(path, options, isRetry){
     options = options || {};
     const headers = Object.assign({ 'Content-Type': 'application/json' }, options.headers || {});
     if(authToken) headers.Authorization = 'Bearer ' + authToken;
     const res = await fetch(API_BASE + path, Object.assign({ cache: 'no-store' }, options, { headers }));
     let data = null;
     try { data = await res.json(); } catch(e) { data = null; }
+    if(res.status === 401 && !isRetry){
+      if(await refreshAccessToken()) return apiRequest(path, options, true);
+      setAuthToken(null, null);
+      showLogin();
+    }
     if(!res.ok){
       const err = new Error((data && data.message) || `요청 실패 (${res.status})`);
       err.status = res.status;
@@ -101,21 +126,29 @@
   });
 
   // ---------- 로그인 ----------
-  function setAuthToken(token){
+  // 토큰을 브라우저에 저장해서, 창을 닫았다 열어도 30일 동안(사용할 때마다 연장) 로그인이 유지되게 함
+  function setAuthToken(token, refreshToken){
     authToken = token;
-    try { if(token) localStorage.setItem('catchme_admin_token', token); else localStorage.removeItem('catchme_admin_token'); } catch(e){}
+    if(refreshToken !== undefined) refreshTokenValue = refreshToken;
+    try {
+      if(token) localStorage.setItem('catchme_admin_token', token); else localStorage.removeItem('catchme_admin_token');
+      if(refreshTokenValue) localStorage.setItem('catchme_admin_refresh', refreshTokenValue); else localStorage.removeItem('catchme_admin_refresh');
+    } catch(e){}
   }
 
   async function tryAutoLogin(){
     let saved = null;
-    try { saved = localStorage.getItem('catchme_admin_token'); } catch(e){}
-    if(!saved) return showLogin();
+    try {
+      saved = localStorage.getItem('catchme_admin_token');
+      refreshTokenValue = localStorage.getItem('catchme_admin_refresh');
+    } catch(e){}
+    if(!saved && !refreshTokenValue) return showLogin();
     authToken = saved;
     try {
       await apiRequest('/admin/overview');
       showApp();
     } catch(e) {
-      setAuthToken(null);
+      setAuthToken(null, null);
       showLogin();
     }
   }
@@ -149,13 +182,14 @@
       if(!res.ok) throw new Error(data.message || '로그인에 실패했어요.');
 
       authToken = data.token;
+      refreshTokenValue = null; // 관리자 확인 전에는 갱신 시도 안 함
       try {
         await apiRequest('/admin/overview');
       } catch(adminErr){
         authToken = null;
         throw new Error(adminErr.status === 403 ? '관리자 계정이 아니에요.' : '확인 중 오류가 발생했어요.');
       }
-      setAuthToken(data.token);
+      setAuthToken(data.token, data.refreshToken);
       document.getElementById('whoAmI').textContent = data.user ? `${data.user.name} (@${data.user.username})` : '';
       showApp();
     } catch(err) {
@@ -168,7 +202,14 @@
   });
 
   document.getElementById('logoutBtn').addEventListener('click', () => {
-    setAuthToken(null);
+    if(refreshTokenValue){
+      fetch(API_BASE + '/auth/logout', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ refreshToken: refreshTokenValue }),
+      }).catch(() => {});
+    }
+    setAuthToken(null, null);
     showLogin();
   });
 
