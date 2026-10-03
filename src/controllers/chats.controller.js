@@ -2,6 +2,7 @@ const prisma = require('../lib/prisma');
 const { getIo } = require('../lib/socket');
 const { isAllowedImageDataUrl } = require('../lib/validators');
 const { computeRecommendation } = require('../lib/locationRecommend');
+const { pushInBackground } = require('../lib/push');
 
 const MEMBER_USER_SELECT = {
   id: true,
@@ -27,6 +28,27 @@ async function notifyRoom(chatRoomId, senderId, event, payload) {
   otherIds.forEach((userId) => {
     io.to(`user:${userId}`).emit(event, payload);
   });
+}
+
+// 방의 나머지 멤버(이 방 알림을 끈 사람 제외)에게 휴대폰 푸시를 보냄. 응답은 기다리지 않음
+function pushToRoom(chatRoomId, senderId, body) {
+  (async () => {
+    const room = await prisma.chatRoom.findUnique({
+      where: { id: chatRoomId },
+      select: {
+        isGroup: true,
+        name: true,
+        members: { select: { userId: true, muted: true, user: { select: { name: true } } } },
+      },
+    });
+    if (!room) return;
+    const targets = room.members.filter((m) => m.userId !== senderId && !m.muted).map((m) => m.userId);
+    if (targets.length === 0) return;
+    const senderName = room.members.find((m) => m.userId === senderId)?.user?.name || 'CATCHME';
+    const title = room.isGroup ? (room.name || '그룹 채팅') : senderName;
+    const text = room.isGroup ? `${senderName}: ${body}` : body;
+    pushInBackground(targets, { title, body: text, data: { type: 'chat', roomId: chatRoomId } });
+  })().catch((err) => console.error('[pushToRoom]', err.message));
 }
 
 function serializeMessage(message) {
@@ -575,6 +597,7 @@ async function sendTextMessage(req, res) {
   });
 
   await notifyRoom(roomId, req.userId, 'newMessage', { roomId, message: serializeMessage(message) });
+  pushToRoom(roomId, req.userId, message.text);
 
   return res.status(201).json({ message: serializeMessage(message) });
 }
@@ -603,6 +626,7 @@ async function sendImageMessage(req, res) {
   });
 
   await notifyRoom(roomId, req.userId, 'newMessage', { roomId, message: serializeMessage(message) });
+  pushToRoom(roomId, req.userId, '사진을 보냈어요');
   return res.status(201).json({ message: serializeMessage(message) });
 }
 
@@ -690,6 +714,7 @@ async function sendReservationRequest(req, res) {
   });
 
   await notifyRoom(roomId, req.userId, 'newMessage', { roomId, message: serializeMessage(message) });
+  pushToRoom(roomId, req.userId, '약속 요청을 보냈어요');
 
   return res.status(201).json({ message: serializeMessage(message) });
 }
@@ -790,6 +815,9 @@ async function respondToReservation(req, res, status) {
   }
 
   await notifyRoom(message.chatRoomId, req.userId, 'newMessage', { roomId: message.chatRoomId, message: serializeMessage(updated) });
+  if (status === 'CONFIRMED' && updated?.reservationStatus === 'CONFIRMED') {
+    pushToRoom(message.chatRoomId, req.userId, '약속이 확정됐어요!');
+  }
 
   return res.json({ message: serializeMessage(updated) });
 }
@@ -1059,6 +1087,7 @@ async function sendLocationSuggest(req, res) {
       locationStatus: immediate ? 'CONFIRMED' : 'PENDING',
     },
   });
+  pushToRoom(roomId, req.userId, immediate ? `장소를 ${trimmedPlace}(으)로 정했어요` : `장소로 ${trimmedPlace}을(를) 제안했어요`);
 
   if (immediate) {
     // 바로 확정이면 대기 중이던 다른 후보들도 마감되니 같이 알림
@@ -1244,7 +1273,7 @@ async function cancelLocationSuggestMessage(req, res) {
 }
 
 // 어떤 후보든 방의 모든 멤버가 투표했으면 그걸로 확정 (모두의 캘린더에 일정 등록 + 핀 고정)
-async function maybeConfirmProposal(message, roomId) {
+async function maybeConfirmProposal(message, roomId, actorId) {
   if (message.proposalStatus !== 'VOTING') return null;
   const room = await prisma.chatRoom.findUnique({ where: { id: roomId } });
   const members = await prisma.chatRoomMember.findMany({ where: { chatRoomId: roomId } });
@@ -1260,7 +1289,8 @@ async function maybeConfirmProposal(message, roomId) {
 
   const memberIds = members.map((m) => m.userId);
 
-  return prisma.$transaction(async (tx) => {
+  let confirmedNow = false;
+  const result = await prisma.$transaction(async (tx) => {
     // proposalStatus가 여전히 VOTING일 때만 확정되도록 조건을 걸어서, 마지막 투표가 거의 동시에 두 번 들어와도
     // 딱 한 번만 확정 처리되게 함 (동시에 통과해서 일정이 중복 생성되는 경쟁 상태 방지)
     const { count } = await tx.message.updateMany({
@@ -1268,6 +1298,7 @@ async function maybeConfirmProposal(message, roomId) {
       data: { proposalStatus: 'CONFIRMED' },
     });
     if (count === 0) return tx.message.findUnique({ where: { id: message.id }, include: PROPOSAL_INCLUDE });
+    confirmedNow = true;
 
     // 확정된 시간과 겹치는 "예약 가능" 표시를 정리 (안 그러면 같은 시간에 "예약 가능"이랑 "약속"이 같이 남아서 헷갈림)
     await clearAvailabilityInRange(memberIds, winner.startTime, winner.endTime, tx);
@@ -1300,6 +1331,8 @@ async function maybeConfirmProposal(message, roomId) {
 
     return tx.message.findUnique({ where: { id: message.id }, include: PROPOSAL_INCLUDE });
   });
+  if (confirmedNow) pushToRoom(roomId, actorId, `약속이 확정됐어요! ${formatDateLabel(winner.startTime)} ${formatTimeLabel(winner.startTime, winner.endTime)}`);
+  return result;
 }
 
 // POST /api/chats/:roomId/time-proposals   body: { options: [{ start, end }, ...] }
@@ -1343,10 +1376,11 @@ async function sendTimeProposal(req, res) {
   }
 
   const withVotes = await prisma.message.findUnique({ where: { id: created.id }, include: PROPOSAL_INCLUDE });
-  const confirmed = await maybeConfirmProposal(withVotes, roomId);
+  const confirmed = await maybeConfirmProposal(withVotes, roomId, req.userId);
   const final = confirmed || withVotes;
 
   await notifyRoom(roomId, req.userId, 'newMessage', { roomId, message: serializeMessage(final) });
+  if (!confirmed) pushToRoom(roomId, req.userId, '약속 시간을 제안했어요');
   return res.status(201).json({ message: serializeMessage(final) });
 }
 
@@ -1373,7 +1407,7 @@ async function voteTimeProposal(req, res) {
   await prisma.timeProposalVote.create({ data: { optionId, userId: req.userId } });
 
   const updated = await prisma.message.findUnique({ where: { id: messageId }, include: PROPOSAL_INCLUDE });
-  const confirmed = await maybeConfirmProposal(updated, message.chatRoomId);
+  const confirmed = await maybeConfirmProposal(updated, message.chatRoomId, req.userId);
   const final = confirmed || updated;
 
   await notifyRoom(message.chatRoomId, req.userId, 'newMessage', { roomId: message.chatRoomId, message: serializeMessage(final) });

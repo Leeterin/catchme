@@ -1,8 +1,21 @@
 const prisma = require('../lib/prisma');
 const { getIo } = require('../lib/socket');
+const { pushInBackground } = require('../lib/push');
 const { distanceKm } = require('../lib/geo');
 
 // 특정 유저(userId)한테 실시간 알림을 보냄. 그 유저가 지금 접속중이 아니면 그냥 조용히 무시됨(다음 접속/새로고침 때 REST로 최신 상태를 받아가니까 문제없음)
+// 친구 요청(또는 자동 수락으로 바로 친구가 됨)을 받는 사람 휴대폰으로 푸시
+function pushFriendRequest(senderId, receiverId, autoAccept) {
+  prisma.user.findUnique({ where: { id: senderId }, select: { name: true } }).then((sender) => {
+    const name = sender?.name || '누군가';
+    pushInBackground([receiverId], {
+      title: 'CATCHME',
+      body: autoAccept ? `${name}님과 친구가 됐어요` : `${name}님이 친구 요청을 보냈어요`,
+      data: { type: 'friend' },
+    });
+  }).catch(() => {});
+}
+
 function notifyUser(userId, event, payload) {
   const io = getIo();
   if (!io) return;
@@ -391,6 +404,7 @@ async function sendRequest(req, res) {
       },
     });
     notifyUser(receiver.id, autoAccept ? 'friendsChanged' : 'friendRequestReceived', {});
+  pushFriendRequest(req.userId, receiver.id, autoAccept);
     return res.status(201).json({
       message: autoAccept ? '친구가 됐어요! (상대방이 자동 수락을 켜뒀어요)' : '친구 요청을 보냈어요.',
       requestId: revived.id,
@@ -407,6 +421,7 @@ async function sendRequest(req, res) {
   });
   // 받는 사람한테 실시간으로 알려줘서, 새로고침 안 해도 "받은 요청" 목록에 바로 뜨게 함
   notifyUser(receiver.id, autoAccept ? 'friendsChanged' : 'friendRequestReceived', {});
+  pushFriendRequest(req.userId, receiver.id, autoAccept);
 
   return res.status(201).json({
     message: autoAccept ? '친구가 됐어요! (상대방이 자동 수락을 켜뒀어요)' : '친구 요청을 보냈어요.',

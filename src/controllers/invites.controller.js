@@ -1,6 +1,7 @@
 const crypto = require('crypto');
 const prisma = require('../lib/prisma');
 const { getIo } = require('../lib/socket');
+const { pushInBackground } = require('../lib/push');
 
 // 약속 초대 링크 - 만든 사람(회원)이 날짜/시간 범위를 정해 링크를 만들고,
 // 링크를 받은 사람은 회원가입 없이 이름 + 가능한 1시간 칸을 골라 제출함.
@@ -446,6 +447,11 @@ async function confirmInvite(req, res) {
 
     result.filter((uid) => uid !== req.userId).forEach((uid) => {
       notifyUser(uid, 'inviteUpdated', { token: poll.token, title: poll.title, kind: 'confirmed' });
+    });
+    pushInBackground(result.filter((uid) => uid !== req.userId), {
+      title: 'CATCHME',
+      body: `'${poll.title}' 약속이 확정됐어요!`,
+      data: { type: 'invite', token: poll.token },
     });
 
     const updated = await findPollByToken(poll.token);

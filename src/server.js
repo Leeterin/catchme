@@ -114,6 +114,7 @@ app.use('/api/places', placesRoutes);
 app.use('/api/profile', profileRoutes);
 app.use('/api/meetups', meetupsRoutes);
 app.use('/api/settings', settingsRoutes);
+app.use('/api/push', require('./routes/push.routes'));
 app.use('/api/feed', feedRoutes);
 app.use('/api/reports', reportsRoutes);
 app.use('/api/users', require('./routes/avatar.routes'));

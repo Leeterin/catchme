@@ -84,6 +84,7 @@ model User {
   locationRecommendRequestsMade LocationRecommendRequest[]
   locationRecommendResponses    LocationRecommendResponse[]
   settings       UserSettings?
+  pushTokens     PushToken[]
   blockedUsers   Block[] @relation("Blocker")
   blockedByUsers Block[] @relation("Blocked")
 
@@ -796,4 +797,18 @@ model RoomParticipant {
 
   @@unique([roomId, userId])
   @@map("room_participants")
+}
+
+// 휴대폰 푸시 알림(FCM)용 기기 토큰. 한 사용자가 여러 기기를 쓸 수 있음
+model PushToken {
+  id        String   @id @default(uuid())
+  token     String   @unique
+  userId    String
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  platform  String   @default("android")
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([userId])
+  @@map("push_tokens")
 }
