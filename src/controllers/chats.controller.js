@@ -1001,12 +1001,37 @@ async function confirmLocationSuggestionTx(tx, message) {
   await supersedeOldLocationNotices(tx, message.chatRoomId);
 }
 
-// 장소가 확정되면 캐치미 장소 DB에 "확정" 기록을 남김 (트랜잭션이 끝난 뒤 호출 - 기록이 실패해도 확정은 그대로)
+// 장소가 확정되면 캐치미 장소 DB에 "확정" 기록을 남기고, 이 방의 모임 장소 추천(출발지 모으기/결과 카드)은 이제 필요 없으니 지움
+// (트랜잭션이 끝난 뒤 호출 - 여기서 실패해도 확정 자체는 그대로)
 async function recordLocationConfirm(message, userId) {
-  if (!message || !message.locationPlaceId) return;
-  await recordPlaceEvent(prisma, {
-    placeId: message.locationPlaceId, type: 'CONFIRM', userId, chatRoomId: message.chatRoomId, messageId: message.id,
-  });
+  if (!message) return;
+  if (message.locationPlaceId) {
+    await recordPlaceEvent(prisma, {
+      placeId: message.locationPlaceId, type: 'CONFIRM', userId, chatRoomId: message.chatRoomId, messageId: message.id,
+    });
+  }
+  await clearLocationRecommends(message.chatRoomId);
+}
+
+// 새 장소가 정해지면 이 방의 "모임 장소 추천받기" 카드와 요청을 통째로 지움 (모은 출발지도 같이 삭제됨)
+// 방 사람 모두(정한 사람 포함)에게 지워진 카드 id를 알려서 화면에서도 바로 사라지게 함
+async function clearLocationRecommends(chatRoomId) {
+  try {
+    const msgs = await prisma.message.findMany({
+      where: { chatRoomId, type: 'LOCATION_RECOMMEND' },
+      select: { id: true },
+    });
+    const reqCount = await prisma.locationRecommendRequest.count({ where: { chatRoomId } });
+    if (!msgs.length && !reqCount) return;
+    const messageIds = msgs.map((m) => m.id);
+    await prisma.$transaction([
+      prisma.message.deleteMany({ where: { id: { in: messageIds } } }),
+      prisma.locationRecommendRequest.deleteMany({ where: { chatRoomId } }),
+    ]);
+    await notifyRoom(chatRoomId, null, 'locationRecommendCleared', { roomId: chatRoomId, messageIds });
+  } catch (err) {
+    console.error('[location-recommend] clear failed:', err.message);
+  }
 }
 
 // 클라이언트가 보낸 장소 부가정보(카카오에서 고른 경우) - 장소 DB에 같은 가게를 찾거나 새로 등록할 때 씀
@@ -1671,6 +1696,7 @@ async function updatePin(req, res) {
       },
     });
     await recordPlaceEvent(prisma, { placeId: created.locationPlaceId, type: 'CONFIRM', userId: req.userId, chatRoomId: pin.chatRoomId, messageId: created.id });
+    await clearLocationRecommends(pin.chatRoomId);
     noticeMessage = serializeMessage(created);
     await notifyRoom(pin.chatRoomId, req.userId, 'newMessage', { roomId: pin.chatRoomId, message: noticeMessage });
   }
