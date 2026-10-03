@@ -10,6 +10,14 @@ function normalizePlaceName(name) {
   return String(name || '').toLowerCase().replace(/[\s·.,()[\]\-_'"!]/g, '');
 }
 
+// 지도에서 아무 곳이나 찍어서 생긴 "주소"나 "선택한 위치"는 가게가 아니므로 장소로 등록하지 않음
+const REGION_PREFIX = /^(서울|부산|대구|인천|광주|대전|울산|세종|경기|강원|충북|충남|충청|전북|전남|전라|경북|경남|경상|제주)/;
+function isAddressLikeName(name) {
+  const n = String(name || '').trim();
+  if (!n || n === '선택한 위치' || n === '내 위치') return true;
+  return REGION_PREFIX.test(n) && /\d+(-\d+)?$/.test(n);
+}
+
 function cleanStr(v, max) {
   if (typeof v !== 'string') return null;
   const t = v.trim();
@@ -22,7 +30,7 @@ async function findOrCreatePlace(db, info) {
   const name = cleanStr(info && info.name, 100);
   const lat = typeof info.lat === 'number' && Number.isFinite(info.lat) ? info.lat : null;
   const lon = typeof info.lon === 'number' && Number.isFinite(info.lon) ? info.lon : null;
-  if (!name || lat === null || lon === null) return null;
+  if (!name || lat === null || lon === null || isAddressLikeName(name)) return null;
   const kakaoPlaceId = cleanStr(info.kakaoPlaceId != null ? String(info.kakaoPlaceId) : null, 40);
   const normName = normalizePlaceName(name);
   const category = PLACE_CATEGORIES.includes(info.category) ? info.category : null;
@@ -104,4 +112,4 @@ async function recordPlaceEvent(db, { placeId, type, userId, chatRoomId, message
   }
 }
 
-module.exports = { normalizePlaceName, findOrCreatePlace, safeFindOrCreatePlace, recordPlaceEvent, PLACE_CATEGORIES };
+module.exports = { isAddressLikeName, normalizePlaceName, findOrCreatePlace, safeFindOrCreatePlace, recordPlaceEvent, PLACE_CATEGORIES };
