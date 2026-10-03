@@ -811,9 +811,22 @@ async function cancelReservationMessage(req, res) {
 
   const updated = await prisma.$transaction(async (tx) => {
     const result = await tx.message.update({ where: { id: messageId }, data: { reservationStatus: 'CANCELLED' } });
-    // 이 예약 자체의 핀뿐 아니라, 같은 방에 별도로 확정해둔 장소 핀("여기 어때요?" 제안 등으로 따로 생긴 핀)도
-    // 이 약속의 장소였을 테니 같이 지움. 안 그러면 약속은 지워졌는데 장소 카드만 채팅방에 유령처럼 남음
-    await tx.pinnedItem.deleteMany({ where: { chatRoomId: message.chatRoomId } });
+    // 이 예약 자체의 핀뿐 아니라, 같은 방에 날짜 없이 "장소만" 임시로 잡아둔 핀("여기 어때요?" 제안 등으로
+    // 따로 생긴 핀)도 이 약속의 장소였을 테니 같이 지움. 안 그러면 약속은 지워졌는데 장소 카드만 채팅방에
+    // 유령처럼 남음.
+    // 주의: 예전엔 이 방의 핀을 전부(chatRoomId 조건만으로) 지웠는데, 그룹 채팅방은 날짜가 다른 약속이
+    // 여러 개 동시에 핀으로 떠 있을 수 있어서(여러 PinnedItem 동시 존재) 그 경우 관계없는 다른 확정 약속의
+    // 핀까지 전부 사라지는 버그였음. sourceMessageId로 "이 예약 자신의 핀"만, 그리고 날짜 없는
+    // "장소만 있는" 핀만 지우도록 조건을 좁힘 - 날짜(dateLabel)가 있는 다른 약속의 핀은 그대로 남김
+    await tx.pinnedItem.deleteMany({
+      where: {
+        chatRoomId: message.chatRoomId,
+        OR: [
+          { sourceMessageId: messageId },
+          { dateLabel: null },
+        ],
+      },
+    });
 
     // 확정되면서 양쪽 캘린더에 생겼던 "약속" 일정을 실제로 지움 (안 지우면 취소해도 유령처럼 계속 남음)
     const linkedEvents = await tx.event.findMany({ where: { sourceMessageId: messageId, isPendingHold: false } });
@@ -1352,8 +1365,18 @@ async function cancelTimeProposal(req, res) {
       data: { proposalStatus: 'CANCELLED' },
       include: PROPOSAL_INCLUDE,
     });
-    // 이 제안 자체의 핀뿐 아니라, 같은 방에 별도로 확정해둔 장소 핀도 이 약속의 장소였을 테니 같이 지움
-    await tx.pinnedItem.deleteMany({ where: { chatRoomId: message.chatRoomId } });
+    // 이 제안 자체의 핀뿐 아니라, 날짜 없이 "장소만" 임시로 잡아둔 핀도 이 약속의 장소였을 테니 같이 지움.
+    // (1:1 예약 취소의 cancelReservationMessage와 같은 이유로, chatRoomId만으로 지우면 그룹방에 동시에
+    // 떠 있는 다른 날짜의 확정 약속 핀까지 같이 지워지는 버그였음 - sourceMessageId/날짜없는 핀만 좁혀서 지움)
+    await tx.pinnedItem.deleteMany({
+      where: {
+        chatRoomId: message.chatRoomId,
+        OR: [
+          { sourceMessageId: messageId },
+          { dateLabel: null },
+        ],
+      },
+    });
 
     // 이미 확정돼서 다들 캘린더에 "약속"이 생겨있던 상태였다면, 그 일정들도 실제로 지우고 예약가능을 복원함
     if (wasConfirmed) {
