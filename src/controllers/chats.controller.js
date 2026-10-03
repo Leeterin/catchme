@@ -503,10 +503,10 @@ async function getOrCreateDirectRoom(req, res) {
     return res.json({ roomId: existing.id, created: false });
   }
 
-  // 새 1:1 방을 처음 여는 경우에만 - 상대가 "친구가 아닌 사람의 채팅 요청 허용"을 꺼뒀으면(기본값) 친구만 채팅을 시작할 수 있음.
+  // 새 1:1 방을 처음 여는 경우에만 - 상대가 "친구가 아닌 사람의 채팅 요청 허용"을 꺼뒀으면(기본은 켜짐) 친구만 채팅을 시작할 수 있음.
   // 이미 있던 방은 위에서 그대로 돌려주므로 예전 대화는 계속 이어갈 수 있음
   const otherSettings = await prisma.userSettings.findUnique({ where: { userId: other.id } });
-  const allowStrangers = !!(otherSettings && otherSettings.privStrangerChat);
+  const allowStrangers = !otherSettings || otherSettings.privStrangerChat !== false;
   if (!allowStrangers) {
     const friendRow = await prisma.friendRequest.findFirst({
       where: {

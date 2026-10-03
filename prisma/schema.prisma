@@ -695,7 +695,7 @@ model UserSettings {
   defaultScheduleView String  @default("month") // "day" | "week" | "month"
 
   privCalendarPublic Boolean @default(false) // 켜면 친구 캘린더에 일정 "제목"까지 노출
-  privStrangerChat   Boolean @default(false) // 아직 실제 기능은 없고 값만 저장됨
+  privStrangerChat   Boolean @default(true) // 끄면 친구만 나에게 새 1:1 채팅을 시작할 수 있음
 
   notifMessage   Boolean @default(true)
   notifFriendreq Boolean @default(true)

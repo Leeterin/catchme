@@ -4,7 +4,7 @@ const DEFAULTS = {
   darkMode: false,
   defaultScheduleView: 'month',
   privCalendarPublic: false,
-  privStrangerChat: false,
+  privStrangerChat: true,
   notifMessage: true,
   notifFriendreq: true,
   notifMatched: true,
