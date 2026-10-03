@@ -1,3 +1,4 @@
+const crypto = require('crypto');
 const prisma = require('../lib/prisma');
 const { distanceKm } = require('../lib/geo');
 const { isAllowedImageDataUrl } = require('../lib/validators');
@@ -47,7 +48,41 @@ function serializeAuthor(author) {
 // 게시물 하나를 통째로 반환 (제목/위치/카테고리 등 전부 게시물 자체에 있음 - 더 이상 장소로 안 묶음).
 // 예전 방식(장소 분리 시절)으로 만들어진 게시물은 title/category/location이 비어있을 수 있어서,
 // 그 경우엔 연결된 place에서 값을 가져와 보여줌 (과거 데이터도 안 깨지게).
-function serializePost(post, myUserId) {
+// 사진 원본(base64)을 목록 응답에 통째로 넣으면 리뷰가 쌓일수록 소식 탭이 점점 무거워져서,
+// 목록에는 사진 주소(GET /api/feed-photos/:postId/:idx)만 넣고 실제 사진은 브라우저가 따로 받아 캐싱하게 함.
+// ?v=는 사진 내용 해시 - 사진을 바꾸면 주소도 바뀌어서 예전 캐시가 안 보이게 됨
+function apiOrigin(req) {
+  if (process.env.PUBLIC_API_ORIGIN) return process.env.PUBLIC_API_ORIGIN.replace(/\/$/, '');
+  const proto = (req.get('x-forwarded-proto') || req.protocol || 'https').split(',')[0].trim();
+  return `${proto}://${req.get('host')}`;
+}
+function photoUrls(req, postId, photos) {
+  if (!req) return photos;
+  const origin = apiOrigin(req);
+  return photos.map((p, i) => {
+    const v = crypto.createHash('md5').update(p).digest('hex').slice(0, 10);
+    return `${origin}/api/feed-photos/${postId}/${i}?v=${v}`;
+  });
+}
+// 수정할 때 프론트가 기존 사진을 위 주소 그대로 돌려보내면, 이 게시물에 저장돼 있던 원본으로 되바꿔줌
+function resolvePhotoRefs(postId, existingPhotos, photos) {
+  if (!Array.isArray(photos)) return photos;
+  const re = new RegExp(`/api/feed-photos/${postId}/(\\d+)(?:\\?|$)`);
+  return photos.map((p) => {
+    const m = typeof p === 'string' ? p.match(re) : null;
+    return m && existingPhotos[Number(m[1])] ? existingPhotos[Number(m[1])] : p;
+  });
+}
+
+// GET /api/feed-photos/:postId/:idx - 로그인 없이 열어둠 (<img> 태그는 인증 헤더를 못 보내서). 아바타와 같은 방식
+async function getFeedPhoto(req, res) {
+  const { serveBase64Image } = require('./avatar.controller');
+  const post = await prisma.feedPost.findUnique({ where: { id: req.params.postId }, select: { photos: true } });
+  const idx = parseInt(req.params.idx, 10);
+  return serveBase64Image(post && Number.isInteger(idx) ? (post.photos || [])[idx] : null, res);
+}
+
+function serializePost(post, myUserId, req) {
   const likes = post.likes || [];
   // 게시물 자신의 별점(작성자가 처음 남긴 것)과, 리뷰(댓글)에 달린 별점들을 다 합쳐서 평균을 냄.
   // 네이버지도처럼 "4.3 ★★★★☆ (12)" 형태로 보여주기 위한 값.
@@ -68,7 +103,7 @@ function serializePost(post, myUserId) {
     rating: post.rating,
     avgRating: avgRating !== null ? Math.round(avgRating * 10) / 10 : null,
     ratingCount: allRatings.length,
-    photos: post.photos || [],
+    photos: photoUrls(req, post.id, post.photos || []),
     tags: post.tags || [],
     fromMeetup: !!post.fromMeetup,
     likeCount: post._count ? post._count.likes : likes.length,
@@ -125,7 +160,7 @@ async function listFeedPosts(req, res) {
     orderBy: { createdAt: 'desc' },
   });
 
-  let result = posts.map((p) => serializePost(p, req.userId));
+  let result = posts.map((p) => serializePost(p, req.userId, req));
 
   if (hasLocation) {
     // 위치가 없는 게시물(직접 입력만 하고 검색으로 안 고른 경우)은 반경 필터링 대상에서 제외됨
@@ -182,7 +217,7 @@ async function createFeedPost(req, res) {
     include: { author: { select: { id: true, username: true, name: true, profileImageUrl: true, reviewNickname: true, reviewAvatarUrl: true } }, likes: true },
   });
 
-  return res.status(201).json({ post: serializePost(post, req.userId) });
+  return res.status(201).json({ post: serializePost(post, req.userId, req) });
 }
 
 // PATCH /api/feed/:id   body: { title?, note?, rating?, photos?, location?, address?, phone?, lat?, lon?, tags? }  - 작성자 본인만 수정 가능
@@ -215,7 +250,7 @@ async function updateFeedPost(req, res) {
     data.rating = rating;
   }
   if (photos !== undefined) {
-    const { valid: validPhotos, error: photoError } = validatePhotos(photos, { requireAtLeastOne: false });
+    const { valid: validPhotos, error: photoError } = validatePhotos(resolvePhotoRefs(id, post.photos || [], photos), { requireAtLeastOne: false });
     if (photoError) return res.status(400).json({ message: photoError });
     data.photos = validPhotos || [];
   }
@@ -229,7 +264,7 @@ async function updateFeedPost(req, res) {
     data,
     include: { author: { select: { id: true, username: true, name: true, profileImageUrl: true, reviewNickname: true, reviewAvatarUrl: true } }, likes: true },
   });
-  return res.json({ post: serializePost(updated, req.userId) });
+  return res.json({ post: serializePost(updated, req.userId, req) });
 }
 
 // DELETE /api/feed/:id  - 작성자 본인만 삭제 가능
@@ -314,6 +349,7 @@ async function deleteComment(req, res) {
 }
 
 module.exports = {
+  getFeedPhoto,
   listFeedPosts, createFeedPost, updateFeedPost, deleteFeedPost,
   toggleLike, listComments, createComment, deleteComment,
 };

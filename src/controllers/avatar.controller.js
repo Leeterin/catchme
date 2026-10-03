@@ -21,6 +21,9 @@ function serveBase64Image(dataUrl, res) {
   res.set('Content-Type', mimeType);
   res.set('X-Content-Type-Options', 'nosniff');
   res.set('Content-Disposition', 'inline');
+  // helmet 기본값(Cross-Origin-Resource-Policy: same-origin) 때문에 앱 화면(다른 도메인)의 <img>에서
+  // 이 사진들이 차단될 수 있어서, 이미지 응답만 다른 도메인에서도 쓸 수 있게 풀어줌
+  res.set('Cross-Origin-Resource-Policy', 'cross-origin');
   res.set('Cache-Control', 'public, max-age=604800, immutable'); // 1주일 동안 브라우저가 다시 안 물어보고 캐시 그대로 씀
   return res.send(buffer);
 }
@@ -46,4 +49,4 @@ async function getUserReviewAvatar(req, res) {
   return serveBase64Image(user ? user.reviewAvatarUrl : null, res);
 }
 
-module.exports = { getUserAvatar, getUserReviewAvatar };
+module.exports = { getUserAvatar, getUserReviewAvatar, serveBase64Image };
