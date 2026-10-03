@@ -381,6 +381,8 @@ async function listChatRooms(req, res) {
           // 보이지 않고 항상 가장 먼저 들어온 사람으로 일관되게 표시되도록 함
           members: { orderBy: { joinedAt: 'asc' }, include: { user: { select: MEMBER_USER_SELECT } } },
           messages: { orderBy: { createdAt: 'desc' }, take: 1 },
+          // 상단 고정 카드 - 방 목록과 같이 보내서, 방에 들어가자마자 기다림 없이 바로 보이게
+          pinnedItems: { orderBy: { createdAt: 'asc' } },
         },
       },
     },
@@ -438,6 +440,7 @@ async function listChatRooms(req, res) {
         otherLastReadAt,
         lastMessage: lastMessage ? serializeMessage(lastMessage) : null,
         lastActivityAt: lastMessage ? lastMessage.createdAt : room.createdAt,
+        pins: room.pinnedItems || [],
       };
     })
   );
