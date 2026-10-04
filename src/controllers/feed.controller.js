@@ -4,6 +4,7 @@ const prisma = require('../lib/prisma');
 const { safeFindOrCreatePlace, recordPlaceEvent } = require('../lib/places');
 const { distanceKm } = require('../lib/geo');
 const { isAllowedImageDataUrl } = require('../lib/validators');
+const { attachAvatarFlags } = require('../lib/avatarFlags');
 
 const MAX_IMAGE_CHARS = 700000; // base64 문자열 기준 대략 500KB (프로필 사진과 동일한 기준)
 const MAX_PHOTOS = 5;
@@ -367,9 +368,10 @@ async function listComments(req, res) {
   const { id } = req.params;
   const comments = await prisma.feedPostComment.findMany({
     where: { postId: id },
-    include: { author: { select: { id: true, username: true, name: true, profileImageUrl: true, reviewNickname: true, reviewAvatarUrl: true } } },
+    include: { author: { select: { id: true, username: true, name: true, reviewNickname: true } } },
     orderBy: { createdAt: 'asc' },
   });
+  await attachAvatarFlags(comments.map((c) => c.author));
   return res.json({ comments: comments.map(serializeComment) });
 }
 
@@ -390,8 +392,9 @@ async function createComment(req, res) {
 
   const comment = await prisma.feedPostComment.create({
     data: { postId: id, authorId: req.userId, text: text.trim(), rating: typeof rating === 'number' ? rating : null },
-    include: { author: { select: { id: true, username: true, name: true, profileImageUrl: true, reviewNickname: true, reviewAvatarUrl: true } } },
+    include: { author: { select: { id: true, username: true, name: true, reviewNickname: true } } },
   });
+  await attachAvatarFlags([comment.author]);
   return res.status(201).json({ comment: serializeComment(comment) });
 }
 

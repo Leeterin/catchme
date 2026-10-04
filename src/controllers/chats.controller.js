@@ -6,6 +6,7 @@ const { pushInBackground } = require('../lib/push');
 const { safeFindOrCreatePlace, recordPlaceEvent } = require('../lib/places');
 const { isRangeBookableFor, hasConfirmedAppointmentOverlap } = require('../lib/bookable');
 const { chatImageUrl, isValidChatImageSig } = require('../lib/chatImage');
+const { attachAvatarFlags } = require('../lib/avatarFlags');
 const { Prisma } = require('@prisma/client');
 
 const MAX_PROPOSAL_OPTIONS = 30;
@@ -15,7 +16,6 @@ const MEMBER_USER_SELECT = {
   id: true,
   username: true,
   name: true,
-  profileImageUrl: true,
 };
 
 // 이 채팅방에서 나를 제외한 나머지 멤버 id 목록 (실시간 알림을 보낼 대상)
@@ -422,6 +422,7 @@ async function listChatRooms(req, res) {
     WHERE m."createdAt" > crm."lastReadAt" AND m."senderId" <> ${req.userId}
     GROUP BY m."chatRoomId"`;
   const unreadByRoom = new Map(unreadRows.map((r) => [r.roomId, r.count]));
+  await attachAvatarFlags(memberships.flatMap((m) => m.chatRoom.members.map((mem) => mem.user)));
 
   const rooms = await Promise.all(
     memberships.map(async (membership) => {
@@ -429,7 +430,7 @@ async function listChatRooms(req, res) {
       // members는 위에서 joinedAt asc로 정렬해왔으니, 가장 먼저 들어온(=원래) 상대방이 항상 고정적으로 뽑힘
       const otherMember = room.isGroup ? null : room.members.find((mem) => mem.userId !== req.userId);
       // 사진 원본(base64) 대신 있는지 여부만 - 실제 이미지는 캐싱되는 /api/users/:id/avatar 로 따로 받음
-      const other = otherMember ? { ...otherMember.user, hasAvatar: !!otherMember.user.profileImageUrl, profileImageUrl: undefined } : null;
+      const other = otherMember ? { ...otherMember.user, hasReviewAvatar: undefined } : null;
       // 상대방이 언제까지 읽었는지 - 보낸 메시지의 "읽음" 표시에 씀 (상대가 읽음 표시를 껐으면 null)
       const otherLastReadAt = otherMember && !receiptOffIds.has(otherMember.userId) ? otherMember.lastReadAt : null;
       const lastMessage = room.messages[0] || null;
@@ -446,7 +447,7 @@ async function listChatRooms(req, res) {
               userId: mem.userId,
               username: mem.user.username,
               name: mem.userId === req.userId ? '나' : mem.user.name,
-              hasAvatar: !!mem.user.profileImageUrl,
+              hasAvatar: mem.user.hasAvatar,
             }))
           : null,
         unreadCount,

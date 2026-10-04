@@ -2,6 +2,7 @@ const prisma = require('../lib/prisma');
 const { getIo } = require('../lib/socket');
 const { pushInBackground } = require('../lib/push');
 const { fuzzyDistanceKm, clampNearbyRadius } = require('../lib/geo');
+const { attachAvatarFlags } = require('../lib/avatarFlags');
 
 // 특정 유저(userId)한테 실시간 알림을 보냄. 그 유저가 지금 접속중이 아니면 그냥 조용히 무시됨(다음 접속/새로고침 때 REST로 최신 상태를 받아가니까 문제없음)
 // 친구 요청(또는 자동 수락으로 바로 친구가 됨)을 받는 사람 휴대폰으로 푸시
@@ -26,7 +27,6 @@ const SELF_SELECT = {
   id: true,
   username: true,
   name: true,
-  profileImageUrl: true,
   bio: true,
   phone: true,
   email: true,
@@ -40,7 +40,7 @@ function toPublicProfile(user) {
     id: user.id,
     username: user.username,
     name: user.name,
-    hasAvatar: !!user.profileImageUrl, // 사진 원본(base64)은 안 보내고, 있는지 여부만 알려줌 - 실제 이미지는 캐싱되는 /api/users/:id/avatar 로 따로 받음
+    hasAvatar: !!user.hasAvatar, // 사진 원본(base64)은 안 보내고 attachAvatarFlags로 붙인 "있는지 여부"만 - 실제 이미지는 캐싱되는 /api/users/:id/avatar 로 따로 받음
     bio: user.bio,
     phone: user.phonePublic ? user.phone : null,
     email: user.emailPublic ? user.email : null,
@@ -73,6 +73,7 @@ async function searchUsers(req, res) {
     take: 20,
   });
 
+  await attachAvatarFlags(users);
   return res.json({ users: users.map(toPublicProfile) });
 }
 
@@ -120,6 +121,7 @@ async function listFriends(req, res) {
     groupIdsByFriend[m.friendId].push(m.groupId);
   });
 
+  await attachAvatarFlags(accepted.map((fr) => (fr.senderId === req.userId ? fr.receiver : fr.sender)));
   const friends = accepted.map((fr) => {
     const other = fr.senderId === req.userId ? fr.receiver : fr.sender;
     const row = settingsMap[other.id];
@@ -178,6 +180,7 @@ async function nearbyFriends(req, res) {
     .filter((u) => u.distanceKm <= radiusKm)
     .sort((a, b) => a.distanceKm - b.distanceKm)
     .slice(0, 50);
+  await attachAvatarFlags(users);
 
   return res.json({ users });
 }
@@ -351,6 +354,7 @@ async function listRequests(req, res) {
     }),
   ]);
 
+  await attachAvatarFlags([...incoming.map((r) => r.sender), ...outgoing.map((r) => r.receiver)]);
   return res.json({
     incoming: incoming.map((r) => ({ requestId: r.id, from: toPublicProfile(r.sender), createdAt: r.createdAt })),
     outgoing: outgoing.map((r) => ({ requestId: r.id, to: toPublicProfile(r.receiver), createdAt: r.createdAt })),
@@ -541,6 +545,7 @@ async function listBlocks(req, res) {
     include: { blocked: { select: SELF_SELECT } },
     orderBy: { createdAt: 'desc' },
   });
+  await attachAvatarFlags(blocks.map((b) => b.blocked));
   return res.json({ blocked: blocks.map((b) => toPublicProfile(b.blocked)) });
 }
 

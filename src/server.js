@@ -110,11 +110,24 @@ app.set('trust proxy', 3);
 
 // 전체 API에 대한 넓은 안전망 - IP 하나당 1분에 300번 넘게 요청하면 잠깐 막음 (봇/무한루프 방지용, 평소 정상 사용엔 영향 없음)
 const rateLimit = require('express-rate-limit');
+// 사진(소식 사진/프로필 사진/채팅 사진) 요청은 따로 셈 - 소식 탭을 열면 사진이 한꺼번에 수십 장 불려서,
+// 같이 세면 300번을 금방 넘겨 채팅 보내기 같은 일반 기능까지 1분 동안 막혔음
+const isImageRequest = (req) => req.method === 'GET'
+  && /^\/(feed-photos\/|chat-images\/|users\/[^/]+\/(avatar|review-avatar)$)/.test(req.path);
 app.use('/api', rateLimit({
   windowMs: 60 * 1000,
   limit: 300,
   standardHeaders: true,
   legacyHeaders: false,
+  skip: isImageRequest,
+  message: { message: '요청이 너무 많아요. 잠시 후 다시 시도해주세요.' },
+}));
+app.use('/api', rateLimit({
+  windowMs: 60 * 1000,
+  limit: 1500,
+  standardHeaders: true,
+  legacyHeaders: false,
+  skip: (req) => !isImageRequest(req),
   message: { message: '요청이 너무 많아요. 잠시 후 다시 시도해주세요.' },
 }));
 

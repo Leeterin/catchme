@@ -1,6 +1,7 @@
 const prisma = require('../lib/prisma');
 const { distanceKm, fuzzyDistanceKm, clampNearbyRadius } = require('../lib/geo');
 const { getIo } = require('../lib/socket');
+const { attachAvatarFlags } = require('../lib/avatarFlags');
 
 // 특정 유저한테 실시간 알림을 보냄 (접속중이 아니면 조용히 무시됨)
 function notifyUser(userId, event, payload) {
@@ -278,16 +279,17 @@ async function listJoinRequests(req, res) {
 
   const pending = await prisma.meetupParticipant.findMany({
     where: { meetupId: id, status: 'PENDING' },
-    include: { user: { select: { id: true, username: true, name: true, profileImageUrl: true } } },
+    include: { user: { select: { id: true, username: true, name: true } } },
     orderBy: { joinedAt: 'asc' },
   });
+  await attachAvatarFlags(pending.map((p) => p.user));
 
   return res.json({
     requests: pending.map((p) => ({
       userId: p.user.id,
       username: p.user.username,
       name: p.user.name,
-      hasAvatar: !!p.user.profileImageUrl,
+      hasAvatar: p.user.hasAvatar,
       intro: p.intro || null,
       requestedAt: p.joinedAt,
     })),
@@ -379,7 +381,7 @@ async function suggestedFriends(req, res) {
         lastLon: { not: null },
         OR: [{ settings: null }, { settings: { friendSearchAllow: true } }],
       },
-      select: { id: true, username: true, name: true, profileImageUrl: true, lastLat: true, lastLon: true },
+      select: { id: true, username: true, name: true, lastLat: true, lastLon: true },
     });
 
     const blocks = await prisma.block.findMany({
@@ -391,12 +393,13 @@ async function suggestedFriends(req, res) {
     const suggestions = nearbyUsers
       .filter((u) => !blockedIds.has(u.id))
       .map((u) => ({
-        id: u.id, username: u.username, name: u.name, hasAvatar: !!u.profileImageUrl,
+        id: u.id, username: u.username, name: u.name,
         distanceKm: fuzzyDistanceKm(lat, lon, u.lastLat, u.lastLon),
       }))
       .filter((u) => u.distanceKm <= radiusKm)
       .sort((a, b) => a.distanceKm - b.distanceKm)
       .slice(0, 20);
+    await attachAvatarFlags(suggestions);
 
     return res.json({ suggestions });
   }
@@ -441,12 +444,13 @@ async function suggestedFriends(req, res) {
 
   const users = await prisma.user.findMany({
     where: { id: { in: candidateIds } },
-    select: { id: true, username: true, name: true, profileImageUrl: true },
+    select: { id: true, username: true, name: true },
   });
+  await attachAvatarFlags(users);
   const suggestions = candidateIds
     .map((id) => users.find((u) => u.id === id))
     .filter(Boolean)
-    .map((u) => ({ id: u.id, username: u.username, name: u.name, hasAvatar: !!u.profileImageUrl, mutualFriendCount: mutualCount[u.id] }));
+    .map((u) => ({ id: u.id, username: u.username, name: u.name, hasAvatar: u.hasAvatar, mutualFriendCount: mutualCount[u.id] }));
 
   return res.json({ suggestions });
 }
