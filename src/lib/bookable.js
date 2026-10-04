@@ -14,6 +14,12 @@ function kstDateKey(date) {
   return `${d.getUTCFullYear()}-${pad(d.getUTCMonth() + 1)}-${pad(d.getUTCDate())}`;
 }
 
+// 반복 일정은 처음 저장된 날짜(startTime의 한국 날짜)가 반복 시작일 - 그보다 앞선 날짜엔 나오지 않음
+// (예전엔 시작일 제한이 없어서 11/3부터 만든 매주 반복이 10/27에도 보였음)
+function isBeforeRecurrenceStart(ev, dateKey) {
+  return kstDateKey(ev.startTime) > dateKey;
+}
+
 // 일정 하나가 그 날짜(dateKey)에 실제로 걸리는 구간 - 반복 일정은 요일/예외/반복 종료일을 확인하고 그 날짜 기준 시각으로 다시 계산.
 // 해당 없으면 null
 function occurrenceOnDate(ev, dateKey) {
@@ -22,6 +28,7 @@ function occurrenceOnDate(ev, dateKey) {
   if (!ev.recurringWeekdays.includes(dayStart.getDay())) return null;
   if (ev.recurringExceptions && ev.recurringExceptions.includes(dateKey)) return null;
   if (ev.recurringUntil && dayStart > new Date(ev.recurringUntil)) return null;
+  if (isBeforeRecurrenceStart(ev, dateKey)) return null;
   return {
     ...ev,
     startTime: kstDate(dateKey, ev.startTime.getHours(), ev.startTime.getMinutes()),
@@ -106,4 +113,4 @@ async function hasConfirmedAppointmentOverlap(userIds, start, end, excludeMessag
   return !!invite;
 }
 
-module.exports = { occurrenceOnDate, isRangeBookableFor, hasConfirmedAppointmentOverlap };
+module.exports = { occurrenceOnDate, isRangeBookableFor, hasConfirmedAppointmentOverlap, isBeforeRecurrenceStart };

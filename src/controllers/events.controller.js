@@ -1,4 +1,5 @@
 const prisma = require('../lib/prisma');
+const { isBeforeRecurrenceStart } = require('../lib/bookable');
 
 // 친구 일정 보기에서 쓰는 하루 시간 칸 (0~23시)
 const MATCH_HOURS = Array.from({ length: 24 }, (_, i) => i);
@@ -139,6 +140,7 @@ async function matchCalendar(req, res) {
         if (!ev.recurringWeekdays.includes(dow)) return;
         if (ev.recurringExceptions && ev.recurringExceptions.includes(dateKey)) return;
         if (ev.recurringUntil && kstDate(dateKey, 0, 0) > new Date(ev.recurringUntil)) return;
+        if (isBeforeRecurrenceStart(ev, dateKey)) return; // 반복 시작일 전
         // 시간(시:분)은 원래 저장된 그대로, 날짜만 지금 확인 중인 날로 다시 계산
         s = kstDate(dateKey, ev.startTime.getHours(), ev.startTime.getMinutes()).getTime();
         e = kstDate(dateKey, ev.endTime.getHours(), ev.endTime.getMinutes()).getTime();
@@ -599,6 +601,7 @@ async function getFriendMonthSchedule(req, res) {
         if (!ev.recurringWeekdays.includes(dow)) return null;
         if (ev.recurringExceptions.includes(dateKey)) return null;
         if (ev.recurringUntil && kstDate(dateKey, 0, 0) > new Date(ev.recurringUntil)) return null; // 반복이 끝난 날은 빼기
+        if (isBeforeRecurrenceStart(ev, dateKey)) return null; // 반복 시작일 전
         return {
           ...ev,
           startTime: kstDate(dateKey, ev.startTime.getHours(), ev.startTime.getMinutes()),
