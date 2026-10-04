@@ -960,39 +960,40 @@ async function restoreAvailabilityChoice(req, res) {
   return res.json({ ok: true });
 }
 
-// 장소 제안 하나를 확정 - 장소 핀을 이걸로 바꾸고, 같은 방에서 아직 대기 중이던 다른 후보들은 마감(DECLINED) 처리.
+// 장소 제안 하나를 확정 - 이 방의 약속 장소 목록에 다음 장소(1차 → 2차 → ...)로 추가하고, 같은 방에서 아직
+// 대기 중이던 다른 후보들은 마감(DECLINED) 처리 (이번 투표 판은 끝남 - 다음 장소는 새로 후보를 올려서 정함).
 // (투표로 정해졌든, 투표 없이 픽스했든, 1:1에서 수락했든 결과는 같음) 반드시 트랜잭션(tx) 안에서 호출
 async function confirmLocationSuggestionTx(tx, message) {
   await tx.message.update({ where: { id: message.id }, data: { locationStatus: 'CONFIRMED' } });
-  // 날짜 없이 "장소만" 고정해두던 예전 핀이 있으면 지우고 이번 걸로 새로 고정함 (안 그러면 이 방에
-  // 장소 핀이 여러 개 쌓여서, 상단 고정 영역에 예전 장소들이 유령처럼 계속 같이 떠 있게 됨)
-  const oldPlacePins = await tx.pinnedItem.findMany({
-    where: { chatRoomId: message.chatRoomId, dateLabel: null },
-    select: { location: true },
-  });
-  await tx.pinnedItem.deleteMany({ where: { chatRoomId: message.chatRoomId, dateLabel: null } });
+  // 예전엔 "장소만" 고정한 핀을 지우고 새로 하나만 남겼는데, 이제는 밥 먹고 카페 가는 것처럼 장소를 여러 개
+  // 정할 수 있게 그대로 두고 뒤에 추가함. 바꾸고 싶으면 고정 카드/상세보기에서 그 장소만 따로 바꾸거나 지우면 됨
   const placeData = {
     location: message.locationPlace,
     locationAddress: message.locationAddress && message.locationAddress !== message.locationPlace ? message.locationAddress : null,
     locationLat: message.locationLat,
     locationLon: message.locationLon,
   };
-  await tx.pinnedItem.create({
-    data: {
-      chatRoomId: message.chatRoomId,
-      note: message.locationNote,
-      ...placeData,
-      sourceMessageId: message.id,
-    },
+  // 이미 같은 장소가 정해져 있으면 또 쌓지 않음
+  const samePlacePin = await tx.pinnedItem.findFirst({
+    where: { chatRoomId: message.chatRoomId, location: { equals: message.locationPlace, mode: 'insensitive' } },
+    select: { id: true },
   });
-  // 상단 고정 카드(확정된 일정)의 "장소 정하기" 칸에도 정해진 장소/주소가 바로 뜨게 - 아직 장소가 없던 일정이나,
-  // 예전에 장소 투표/픽스로 정해졌던 장소가 들어있던 일정만 바꿈 (사람이 직접 따로 정해둔 장소는 덮어쓰지 않음)
-  const oldPlaces = oldPlacePins.map((p) => p.location).filter(Boolean);
+  if (!samePlacePin) {
+    await tx.pinnedItem.create({
+      data: {
+        chatRoomId: message.chatRoomId,
+        note: message.locationNote,
+        ...placeData,
+        sourceMessageId: message.id,
+      },
+    });
+  }
+  // 상단 고정 카드(확정된 일정)에 아직 장소가 없으면 첫 장소(1차)로 채워둠 (이미 장소가 있는 일정은 그대로)
   await tx.pinnedItem.updateMany({
     where: {
       chatRoomId: message.chatRoomId,
       dateLabel: { not: null },
-      OR: [{ location: null }, { location: '' }, ...(oldPlaces.length ? [{ location: { in: oldPlaces } }] : [])],
+      OR: [{ location: null }, { location: '' }],
     },
     data: placeData,
   });
@@ -1000,8 +1001,6 @@ async function confirmLocationSuggestionTx(tx, message) {
     where: { chatRoomId: message.chatRoomId, type: 'LOCATION_SUGGEST', locationStatus: 'PENDING', id: { not: message.id } },
     data: { locationStatus: 'DECLINED' },
   });
-  // 예전에 "장소 정하기"로 남겨뒀던 큰 장소 알림 카드가 있었다면, 이제 이 장소로 바뀌었으니 작은 알림으로 접어둠
-  await supersedeOldLocationNotices(tx, message.chatRoomId);
 }
 
 // 장소가 확정되면 캐치미 장소 DB에 "확정" 기록을 남기고, 이 방의 모임 장소 추천(출발지 모으기/결과 카드)은 이제 필요 없으니 지움
@@ -1145,7 +1144,7 @@ async function sendLocationSuggest(req, res) {
     },
   });
   await recordPlaceEvent(prisma, { placeId: message.locationPlaceId, type: 'SUGGEST', userId: req.userId, chatRoomId: roomId, messageId: message.id });
-  pushToRoom(roomId, req.userId, immediate ? `장소를 ${trimmedPlace}(으)로 정했어요` : `장소로 ${trimmedPlace}을(를) 제안했어요`);
+  pushToRoom(roomId, req.userId, immediate ? `약속 장소에 ${trimmedPlace}을(를) 추가했어요` : `장소로 ${trimmedPlace}을(를) 제안했어요`);
 
   if (immediate) {
     // 바로 확정이면 대기 중이던 다른 후보들도 마감되니 같이 알림
