@@ -84,10 +84,17 @@ function kstMinuteOfDay(d) {
   return k.getUTCHours() * 60 + k.getUTCMinutes();
 }
 
+// 링크 용도: 친구용은 "모두 + 친구만", 일용은 "모두 + 일만" 열어둔 시간을 씀
+const AUDIENCES = ['friends', 'work'];
+function parseAudience(v) {
+  return AUDIENCES.includes(v) ? v : 'friends';
+}
+
 // 이 사람 캘린더에서 "예약 가능"으로 등록된 1시간 칸들 ("YYYY-MM-DD|HH" Set)
 // - 예약 가능 일정이 그 1시간을 빈틈없이 덮어야 하고, 바쁨(약속/예약중) 일정과 겹치면 뺌
+// - 링크 용도(audience)에 안 맞게 열어둔 시간(친구용 링크의 "일만", 일용 링크의 "친구만")은 안 씀
 // - 이미 지난 시간도 뺌
-async function availableCellsFor(userId, dates, startHour = 0, endHour = 24) {
+async function availableCellsFor(userId, dates, startHour = 0, endHour = 24, audience = 'friends') {
   const cells = new Set();
   if (!dates.length) return cells;
   const sorted = [...dates].sort();
@@ -106,8 +113,9 @@ async function availableCellsFor(userId, dates, startHour = 0, endHour = 24) {
         },
       ],
     },
-    select: { startTime: true, endTime: true, status: true, recurringWeekdays: true, recurringUntil: true, recurringExceptions: true },
+    select: { startTime: true, endTime: true, status: true, availableFor: true, recurringWeekdays: true, recurringUntil: true, recurringExceptions: true },
   });
+  const forThisLink = (ev) => ev.availableFor === 'all' || ev.availableFor === audience;
 
   const now = Date.now();
   sorted.forEach((date) => {
@@ -130,7 +138,8 @@ async function availableCellsFor(userId, dates, startHour = 0, endHour = 24) {
         e = s + dur;
       }
       if (s >= dayEnd.getTime() || e <= dayStart.getTime()) return;
-      (ev.status === 'AVAILABLE' ? avail : busy).push([s, e]);
+      if (ev.status === 'BUSY') busy.push([s, e]);
+      else if (forThisLink(ev)) avail.push([s, e]);
     });
     if (!avail.length) return;
     avail.sort((a, b) => a[0] - b[0]);
@@ -156,7 +165,7 @@ async function availableCellsFor(userId, dates, startHour = 0, endHour = 24) {
 // 캘린더 기준 링크면 지금 열려있는 칸들, 아니면 null(범위 안 전부 가능)
 async function openCellsForPoll(poll) {
   if (!poll.fromCalendar || poll.status !== 'OPEN') return null;
-  return availableCellsFor(poll.creatorId, poll.dates, poll.startHour, poll.endHour);
+  return availableCellsFor(poll.creatorId, poll.dates, poll.startHour, poll.endHour, poll.audience);
 }
 
 // 비회원은 브라우저에 저장해둔 guestKey로 자기 응답을 찾음. 회원은 userId로도 찾음
@@ -180,6 +189,7 @@ function serializePoll(poll, { userId, guestKey, openCells } = {}) {
     startHour: poll.startHour,
     endHour: poll.endHour,
     fromCalendar: poll.fromCalendar,
+    audience: poll.audience,
     place: poll.placeName
       ? { name: poll.placeName, address: poll.placeAddress || '', lat: poll.placeLat, lon: poll.placeLon }
       : null,
@@ -212,8 +222,10 @@ async function findPollByToken(token) {
   return prisma.invitePoll.findUnique({ where: { token }, include: POLL_INCLUDE });
 }
 
+// 일용 링크로 잡힌 약속은 캘린더에서 바로 구분되게 앞에 💼를 붙임
 function confirmedEventTitle(poll) {
-  const base = poll.title.length > 40 ? poll.title.slice(0, 40) : poll.title;
+  const raw = poll.title.length > 40 ? poll.title.slice(0, 40) : poll.title;
+  const base = poll.audience === 'work' ? `💼 ${raw}` : raw;
   return poll.placeName ? `${base} @ ${poll.placeName}`.slice(0, 80) : base;
 }
 
@@ -256,13 +268,13 @@ async function addConfirmedEvent(db, poll, userId) {
   });
 }
 
-// GET /api/invites/availability - 링크 만들기 화면 미리보기용, 오늘부터 3주 동안 내 예약 가능 칸
+// GET /api/invites/availability?audience=friends|work - 링크 만들기 화면 미리보기용, 오늘부터 3주 동안 내 예약 가능 칸
 async function myAvailability(req, res) {
   try {
     const today = todayKstStr();
     const dates = [];
     for (let i = 0; i < 21; i++) dates.push(addDaysStr(today, i));
-    const cells = await availableCellsFor(req.userId, dates);
+    const cells = await availableCellsFor(req.userId, dates, 0, 24, parseAudience(req.query.audience));
     const byDate = {};
     [...cells].sort().forEach((c) => {
       const [d, h] = c.split('|');
@@ -275,22 +287,27 @@ async function myAvailability(req, res) {
   }
 }
 
-// POST /api/invites  { title, dates: ["YYYY-MM-DD"], startHour, endHour, fromCalendar, place? }
+// POST /api/invites  { title, dates: ["YYYY-MM-DD"], startHour, endHour, fromCalendar, audience?, place? }
 // fromCalendar면 startHour/endHour는 무시하고, 고른 날짜들의 내 예약 가능 시간으로 범위를 정함
 async function createInvite(req, res) {
   try {
     const title = String(req.body.title || '').trim().slice(0, MAX_TITLE);
     const rawDates = Array.isArray(req.body.dates) ? req.body.dates : [];
     const fromCalendar = req.body.fromCalendar === true;
+    const audience = parseAudience(req.body.audience);
     let startHour = parseInt(req.body.startHour, 10);
     let endHour = parseInt(req.body.endHour, 10);
 
     if (!title) return res.status(400).json({ message: '약속 이름을 적어주세요.' });
     let dates = [...new Set(rawDates.filter(isValidDateStr))].sort();
     if (fromCalendar && dates.length > 0 && dates.length <= MAX_DATES) {
-      const cells = [...await availableCellsFor(req.userId, dates)];
+      const cells = [...await availableCellsFor(req.userId, dates, 0, 24, audience)];
       if (cells.length === 0) {
-        return res.status(400).json({ message: '고른 날짜에 예약 가능한 시간이 없어요. 캘린더에서 먼저 등록해주세요.' });
+        return res.status(400).json({
+          message: audience === 'work'
+            ? '고른 날짜에 일용으로 열어둔 시간이 없어요. 캘린더에서 "모두"나 "일만"으로 먼저 열어주세요.'
+            : '고른 날짜에 예약 가능한 시간이 없어요. 캘린더에서 먼저 등록해주세요.',
+        });
       }
       const hours = cells.map((c) => Number(c.split('|')[1]));
       startHour = Math.min(...hours);
@@ -314,6 +331,7 @@ async function createInvite(req, res) {
         startHour,
         endHour,
         fromCalendar,
+        audience,
         ...(parsePlace(req.body.place) || {}),
       },
       include: POLL_INCLUDE,

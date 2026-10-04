@@ -53,7 +53,7 @@ async function isRangeBookableFor(ownerId, viewerId, start, end) {
         ],
       },
       select: {
-        startTime: true, endTime: true, status: true, visiblePrivate: true, visibleGroupIds: true,
+        startTime: true, endTime: true, status: true, visiblePrivate: true, visibleGroupIds: true, availableFor: true,
         recurringWeekdays: true, recurringUntil: true, recurringExceptions: true,
       },
     }),
@@ -61,6 +61,7 @@ async function isRangeBookableFor(ownerId, viewerId, start, end) {
   const privateAccess = settingsRow ? settingsRow.privateAccess : false;
   const myGroupIds = new Set(memberships.map((m) => m.groupId));
   const visibleToViewer = (ev) => {
+    if (ev.availableFor === 'work') return false; // "일만" 열어둔 시간은 일용 초대 링크 전용 - 친구는 예약 못 함
     if (ev.visiblePrivate) return privateAccess;
     if (ev.visibleGroupIds && ev.visibleGroupIds.length > 0) return ev.visibleGroupIds.some((gid) => myGroupIds.has(gid));
     return true;

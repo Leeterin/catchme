@@ -197,7 +197,7 @@ async function clearAvailabilityInRange(userIds, start, end, client) {
         data: {
           userId: ev.userId, status: 'AVAILABLE', eventType: 'available', title: ev.title,
           startTime: ev.startTime, endTime: start,
-          visibleGroupIds: ev.visibleGroupIds, visiblePrivate: ev.visiblePrivate,
+          visibleGroupIds: ev.visibleGroupIds, visiblePrivate: ev.visiblePrivate, availableFor: ev.availableFor,
         },
       });
     }
@@ -206,7 +206,7 @@ async function clearAvailabilityInRange(userIds, start, end, client) {
         data: {
           userId: ev.userId, status: 'AVAILABLE', eventType: 'available', title: ev.title,
           startTime: end, endTime: ev.endTime,
-          visibleGroupIds: ev.visibleGroupIds, visiblePrivate: ev.visiblePrivate,
+          visibleGroupIds: ev.visibleGroupIds, visiblePrivate: ev.visiblePrivate, availableFor: ev.availableFor,
         },
       });
     }
@@ -273,18 +273,20 @@ async function restoreAvailabilityInRange(userId, start, end, client, options) {
     }
 
     let mergedStart = seg.start, mergedEnd = seg.end;
-    let title = '예약 가능', visibleGroupIds = [], visiblePrivate = false;
+    let title = '예약 가능', visibleGroupIds = [], visiblePrivate = false, availableFor = 'all';
     if (left) {
       mergedStart = left.startTime;
       title = left.title;
       visibleGroupIds = left.visibleGroupIds;
       visiblePrivate = left.visiblePrivate;
+      availableFor = left.availableFor;
     }
     if (right) {
       mergedEnd = right.endTime;
       title = right.title;
       visibleGroupIds = right.visibleGroupIds;
       visiblePrivate = right.visiblePrivate;
+      availableFor = right.availableFor;
     }
     if (left) await db.event.delete({ where: { id: left.id } });
     if (right) await db.event.delete({ where: { id: right.id } });
@@ -293,7 +295,7 @@ async function restoreAvailabilityInRange(userId, start, end, client, options) {
       data: {
         userId, status: 'AVAILABLE', eventType: 'available', title,
         startTime: mergedStart, endTime: mergedEnd,
-        visibleGroupIds, visiblePrivate,
+        visibleGroupIds, visiblePrivate, availableFor,
       },
     });
   }

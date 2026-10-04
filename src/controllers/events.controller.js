@@ -94,14 +94,16 @@ async function matchCalendar(req, res) {
       ],
     },
     select: {
-      userId: true, startTime: true, endTime: true, status: true, visiblePrivate: true, visibleGroupIds: true,
+      userId: true, startTime: true, endTime: true, status: true, visiblePrivate: true, visibleGroupIds: true, availableFor: true,
       recurringWeekdays: true, recurringUntil: true, recurringExceptions: true,
     },
   });
 
   // 내 일정은 항상 나한테 보이고, 다른 사람 일정은: "나만보기"면 그 사람이 나한테 privateAccess를 켜줬을 때만,
   // 특정 그룹으로 공개돼있으면 내가 그 그룹(들) 중 하나에 속해있을 때만, 둘 다 아니면(그룹 지정 없음) 모든 친구에게 공개
+  // "일만" 열어둔 시간은 친구 매칭에 안 씀 (내 것이든 친구 것이든)
   const events = rawEvents.filter((ev) => {
+    if (ev.availableFor === 'work') return false;
     if (ev.userId === req.userId) return true;
     if (ev.visiblePrivate) return !!privateAccessMap[ev.userId];
     if (ev.visibleGroupIds && ev.visibleGroupIds.length > 0) {
@@ -204,6 +206,7 @@ function serializeEvent(event) {
     endTime: event.endTime,
     status: event.status,
     eventType: event.eventType,
+    availableFor: event.availableFor || 'all',
     isPendingHold: event.isPendingHold,
     // 확정된 예약(약속)이라 채팅에서만 취소할 수 있는 일정인지 - 홀드가 아니면서 채팅방에 연결돼 있으면 그런 경우임
     isReservationLinked: !event.isPendingHold && !!event.sourceChatRoomId,
@@ -316,9 +319,15 @@ function sanitizeEventColor(color) {
   return undefined;
 }
 
+// 예약 가능을 누구에게 열지 - 이상한 값이면 undefined (생성 땐 'all'로, 수정 땐 기존 값 유지)
+const AVAILABLE_FOR = ['all', 'friends', 'work'];
+function sanitizeAvailableFor(v) {
+  return AVAILABLE_FOR.includes(v) ? v : undefined;
+}
+
 // POST /api/events   body: { title, startTime, endTime, status?, eventType?, visibility?:{groupIds,private}, recurringWeekdays?, recurringUntil?, color? }
 async function createEvent(req, res) {
-  const { title, startTime, endTime, status, eventType, visibility, sourceChatRoomId, recurringWeekdays, recurringUntil, color } = req.body;
+  const { title, startTime, endTime, status, eventType, visibility, sourceChatRoomId, recurringWeekdays, recurringUntil, color, availableFor } = req.body;
   const { valid, errors } = validateEventInput({ title, startTime, endTime, status });
   if (!valid) return res.status(400).json({ message: '입력값을 확인해주세요.', errors });
 
@@ -337,6 +346,7 @@ async function createEvent(req, res) {
       endTime: new Date(endTime),
       status: status || 'BUSY',
       eventType: eventType === 'available' ? 'available' : 'busy',
+      availableFor: sanitizeAvailableFor(availableFor) || 'all',
       visiblePrivate: isPrivate,
       visibleGroupIds: groupIds,
       sourceChatRoomId: typeof sourceChatRoomId === 'string' ? sourceChatRoomId : null,
@@ -356,7 +366,7 @@ async function updateEvent(req, res) {
     return res.status(404).json({ message: '일정을 찾을 수 없어요.' });
   }
 
-  const { title, startTime, endTime, status, eventType, visibility, recurringWeekdays, recurringUntil, recurringExceptions, color } = req.body;
+  const { title, startTime, endTime, status, eventType, visibility, recurringWeekdays, recurringUntil, recurringExceptions, color, availableFor } = req.body;
   const { valid, errors } = validateEventInput({ title, startTime, endTime, status }, { partial: true });
   if (!valid) return res.status(400).json({ message: '입력값을 확인해주세요.', errors });
 
@@ -389,6 +399,7 @@ async function updateEvent(req, res) {
       endTime: endTime !== undefined ? nextEnd : undefined,
       status: status !== undefined ? status : undefined,
       eventType: eventType !== undefined ? (eventType === 'available' ? 'available' : 'busy') : undefined,
+      availableFor: sanitizeAvailableFor(availableFor),
       visiblePrivate: visiblePrivateUpdate,
       visibleGroupIds: visibleGroupIdsUpdate,
       recurringWeekdays: weekdays,
@@ -460,7 +471,7 @@ async function getFriendDaySchedule(req, res) {
       ],
     },
     select: {
-      startTime: true, endTime: true, status: true, title: true, visiblePrivate: true, visibleGroupIds: true,
+      startTime: true, endTime: true, status: true, title: true, visiblePrivate: true, visibleGroupIds: true, availableFor: true,
       recurringWeekdays: true, recurringUntil: true, recurringExceptions: true,
     },
   });
@@ -484,9 +495,11 @@ async function getFriendDaySchedule(req, res) {
   // 이 공개설정을 통과한 일정이면(=바쁨 여부를 볼 수 있는 일정이면) 제목도 함께 보여줌 - 별도의 "전체 공개" 설정은 더 이상 필요 없음.
   // "나만보기" 일정은 원래 아무한테도 안 보이지만, 그 친구가 나한테 privateAccess를 켜줬으면 예외로 보여줌.
   // 특정 그룹에게만 공개된 일정은 내가 그 그룹(들) 중 하나에 속해있을 때만 보임
+  // "일만" 열어둔 시간은 친구에게 안 보임 (예약할 수 없는 빈 시간처럼 보임)
   const events = friend.id === req.userId
-    ? rawEvents
+    ? rawEvents.filter((ev) => ev.availableFor !== 'work')
     : rawEvents.filter((ev) => {
+        if (ev.availableFor === 'work') return false;
         if (ev.visiblePrivate) return myPrivateAccess;
         if (ev.visibleGroupIds && ev.visibleGroupIds.length > 0) return ev.visibleGroupIds.some((gid) => myGroupIds.has(gid));
         return true;
@@ -569,7 +582,7 @@ async function getFriendMonthSchedule(req, res) {
       ],
     },
     select: {
-      startTime: true, endTime: true, status: true, title: true, visiblePrivate: true, visibleGroupIds: true,
+      startTime: true, endTime: true, status: true, title: true, visiblePrivate: true, visibleGroupIds: true, availableFor: true,
       recurringWeekdays: true, recurringUntil: true, recurringExceptions: true,
     },
   });
@@ -594,8 +607,9 @@ async function getFriendMonthSchedule(req, res) {
       })
       .filter(Boolean);
     const events = friend.id === req.userId
-      ? rawEvents
+      ? rawEvents.filter((ev) => ev.availableFor !== 'work')
       : rawEvents.filter((ev) => {
+          if (ev.availableFor === 'work') return false;
           if (ev.visiblePrivate) return myPrivateAccess;
           if (ev.visibleGroupIds && ev.visibleGroupIds.length > 0) return ev.visibleGroupIds.some((gid) => myGroupIds.has(gid));
           return true;
