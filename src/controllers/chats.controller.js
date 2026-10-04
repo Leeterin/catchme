@@ -711,6 +711,7 @@ async function sendReservationRequest(req, res) {
         title: holdTitle,
         status: 'BUSY',
         isPendingHold: true,
+        visiblePrivate: true, // 아직 확정 전이라 친구들에겐 안 보이게 나만보기로 둠
         sourceMessageId: createdMessage.id,
         sourceChatRoomId: roomId,
       },
