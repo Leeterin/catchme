@@ -3,6 +3,7 @@ const { requireAuth } = require('../middleware/auth.middleware');
 const { imageUploadLimiter } = require('../middleware/rateLimit.middleware');
 const {
   listChatRooms,
+  listPendingForMe,
   getOrCreateDirectRoom,
   listMessages,
   sendTextMessage,
@@ -44,6 +45,7 @@ const router = express.Router();
 router.use(requireAuth);
 
 router.get('/', listChatRooms);
+router.get('/pending', listPendingForMe); // /:roomId 보다 먼저 등록
 router.post('/direct', getOrCreateDirectRoom);
 router.post('/group', createGroupRoom);
 router.get('/:roomId/messages', listMessages);

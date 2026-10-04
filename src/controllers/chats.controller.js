@@ -1985,8 +1985,78 @@ async function cancelLocationRecommend(req, res) {
   return res.json({ cancelled: true });
 }
 
+// GET /api/chats/pending - 내가 답해야 할 요청들을 모든 방에서 모아줌 (홈의 "답할 차례" 카드용, 읽기 전용)
+// - 상대가 보낸 대기 중 예약 요청(RESERVATION, PENDING, 아직 안 지난 것)
+// - 투표 중인 시간 제안(TIME_PROPOSAL, VOTING) 중 내가 아직 아무 후보에도 투표 안 한 것 (내가 보낸 건 제외)
+async function listPendingForMe(req, res) {
+  const memberships = await prisma.chatRoomMember.findMany({
+    where: { userId: req.userId },
+    select: { chatRoomId: true },
+  });
+  const roomIds = memberships.map((m) => m.chatRoomId);
+  if (roomIds.length === 0) return res.json({ items: [] });
+  const now = new Date();
+
+  const [reservations, proposals] = await Promise.all([
+    prisma.message.findMany({
+      where: {
+        chatRoomId: { in: roomIds },
+        type: 'RESERVATION',
+        reservationStatus: 'PENDING',
+        senderId: { not: req.userId },
+        reservationEnd: { gt: now },
+      },
+      orderBy: { reservationStart: 'asc' },
+      take: 20,
+      include: { sender: { select: MEMBER_USER_SELECT } },
+    }),
+    prisma.message.findMany({
+      where: {
+        chatRoomId: { in: roomIds },
+        type: 'TIME_PROPOSAL',
+        proposalStatus: 'VOTING',
+        senderId: { not: req.userId },
+        proposalOptions: { none: { votes: { some: { userId: req.userId } } } },
+      },
+      orderBy: { createdAt: 'desc' },
+      take: 20,
+      include: {
+        sender: { select: MEMBER_USER_SELECT },
+        proposalOptions: { select: { startTime: true, endTime: true }, orderBy: { startTime: 'asc' } },
+      },
+    }),
+  ]);
+
+  const items = [
+    ...reservations.map((m) => ({
+      kind: 'reservation',
+      messageId: m.id,
+      roomId: m.chatRoomId,
+      sender: m.sender,
+      start: m.reservationStart,
+      end: m.reservationEnd,
+      createdAt: m.createdAt,
+    })),
+    ...proposals
+      // 후보가 전부 지난 제안은 답할 필요가 없으니 뺌
+      .filter((m) => m.proposalOptions.some((o) => o.endTime > now))
+      .map((m) => ({
+        kind: 'proposal',
+        messageId: m.id,
+        roomId: m.chatRoomId,
+        sender: m.sender,
+        start: m.proposalOptions[0] ? m.proposalOptions[0].startTime : null,
+        end: m.proposalOptions[0] ? m.proposalOptions[0].endTime : null,
+        optionCount: m.proposalOptions.length,
+        createdAt: m.createdAt,
+      })),
+  ];
+  return res.json({ items });
+}
+
 module.exports = {
   listChatRooms,
+  listPendingForMe,
   getOrCreateDirectRoom,
   listMessages,
   sendTextMessage,
