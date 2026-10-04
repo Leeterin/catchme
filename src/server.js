@@ -134,6 +134,8 @@ app.use('/api/reports', reportsRoutes);
 app.use('/api/users', require('./routes/avatar.routes'));
 // 소식 게시물 사진 - 공개(로그인 없이), 브라우저 캐시용
 app.get('/api/feed-photos/:postId/:idx', (req, res, next) => require('./controllers/feed.controller').getFeedPhoto(req, res).catch(next));
+// 채팅 사진 - 서명된 주소로만 열림, 브라우저 캐시용
+app.get('/api/chat-images/:messageId', (req, res, next) => require('./controllers/chats.controller').getChatImage(req, res).catch(next));
 app.use('/api/admin', adminRoutes);
 app.use('/api/invites', invitesRoutes);
 

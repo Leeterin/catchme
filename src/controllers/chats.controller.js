@@ -5,6 +5,8 @@ const { computeRecommendation } = require('../lib/locationRecommend');
 const { pushInBackground } = require('../lib/push');
 const { safeFindOrCreatePlace, recordPlaceEvent } = require('../lib/places');
 const { isRangeBookableFor, hasConfirmedAppointmentOverlap } = require('../lib/bookable');
+const { chatImageUrl, isValidChatImageSig } = require('../lib/chatImage');
+const { Prisma } = require('@prisma/client');
 
 const MAX_PROPOSAL_OPTIONS = 30;
 const MAX_TEXT_LENGTH = 2000;
@@ -90,7 +92,7 @@ function serializeMessage(message) {
   }
 
   if (message.type === 'IMAGE') {
-    return { ...base, imageUrl: message.imageUrl };
+    return { ...base, imageUrl: chatImageUrl(message.id) };
   }
 
   if (message.type === 'LOCATION_SUGGEST') {
@@ -170,6 +172,11 @@ const PROPOSAL_INCLUDE = {
   locationVotes: { select: { userId: true } },
   recommendRequest: { select: { status: true, _count: { select: { responses: true } } } },
 };
+
+// 메시지 목록을 읽을 때 사진 원본(imageUrl, 장당 최대 약 500KB)은 빼고 읽음 - 사진은 /api/chat-images 로 따로 받으니까
+const MESSAGE_FIELDS_WITHOUT_IMAGE = Object.fromEntries(
+  Object.keys(Prisma.MessageScalarFieldEnum).filter((k) => k !== 'imageUrl').map((k) => [k, true])
+);
 
 // 일정이 확정(예약 수락/그룹투표 확정)되면, 그 시간과 겹치는 "예약 가능"(AVAILABLE) 표시는 이제 다 찬 거니까 정리해줌.
 // 겹치는 부분만 없애고, 앞뒤로 남는 시간이 있으면 그 부분은 그대로 "예약 가능"으로 다시 남겨둠 (통째로 지우면 관계없는 시간까지 예약 불가 처리되니까)
@@ -384,7 +391,7 @@ async function listChatRooms(req, res) {
           // 잘못 섞여서 멤버가 늘어난 경우에도(버그로 생긴 예전 데이터 등) "상대방"이 매번 다르게
           // 보이지 않고 항상 가장 먼저 들어온 사람으로 일관되게 표시되도록 함
           members: { orderBy: { joinedAt: 'asc' }, include: { user: { select: MEMBER_USER_SELECT } } },
-          messages: { orderBy: { createdAt: 'desc' }, take: 1 },
+          messages: { orderBy: { createdAt: 'desc' }, take: 1, select: MESSAGE_FIELDS_WITHOUT_IMAGE },
           // 상단 고정 카드 - 방 목록과 같이 보내서, 방에 들어가자마자 기다림 없이 바로 보이게
           pinnedItems: { orderBy: { createdAt: 'asc' } },
         },
@@ -407,6 +414,15 @@ async function listChatRooms(req, res) {
   );
 
   // 각 방마다 "내가 마지막으로 읽은 시각 이후, 내가 보낸 게 아닌 메시지" 개수를 세서 안읽음 배지에 사용
+  // (예전엔 방마다 따로 셌는데, 방이 많으면 DB를 그만큼 여러 번 불러서 한 번에 다 셈)
+  const unreadRows = await prisma.$queryRaw`
+    SELECT m."chatRoomId" AS "roomId", COUNT(*)::int AS "count"
+    FROM messages m
+    JOIN chat_room_members crm ON crm."chatRoomId" = m."chatRoomId" AND crm."userId" = ${req.userId}
+    WHERE m."createdAt" > crm."lastReadAt" AND m."senderId" <> ${req.userId}
+    GROUP BY m."chatRoomId"`;
+  const unreadByRoom = new Map(unreadRows.map((r) => [r.roomId, r.count]));
+
   const rooms = await Promise.all(
     memberships.map(async (membership) => {
       const room = membership.chatRoom;
@@ -418,13 +434,7 @@ async function listChatRooms(req, res) {
       const otherLastReadAt = otherMember && !receiptOffIds.has(otherMember.userId) ? otherMember.lastReadAt : null;
       const lastMessage = room.messages[0] || null;
 
-      const unreadCount = await prisma.message.count({
-        where: {
-          chatRoomId: room.id,
-          createdAt: { gt: membership.lastReadAt },
-          senderId: { not: req.userId },
-        },
-      });
+      const unreadCount = unreadByRoom.get(room.id) || 0;
 
       return {
         id: room.id,
@@ -577,11 +587,21 @@ async function listMessages(req, res) {
     where: { chatRoomId: roomId },
     orderBy: { createdAt: 'desc' },
     take: limit,
-    include: PROPOSAL_INCLUDE,
+    select: { ...MESSAGE_FIELDS_WITHOUT_IMAGE, ...PROPOSAL_INCLUDE },
     ...(req.query.cursor ? { skip: 1, cursor: { id: req.query.cursor } } : {}),
   });
 
   return res.json({ messages: messages.reverse().map(serializeMessage) });
+}
+
+// GET /api/chat-images/:messageId?s=서명 - 로그인 없이 열어둠(<img>는 인증 헤더를 못 보내서), 대신 서명이 맞아야 열림.
+// 보낸 사진은 바뀌지 않으니 휴대폰이 1년 동안 캐시해두고 다시 안 받음
+async function getChatImage(req, res) {
+  const { serveBase64Image } = require('./avatar.controller');
+  const { messageId } = req.params;
+  if (!isValidChatImageSig(messageId, req.query.s)) return res.status(404).end();
+  const message = await prisma.message.findUnique({ where: { id: messageId }, select: { type: true, imageUrl: true } });
+  return serveBase64Image(message && message.type === 'IMAGE' ? message.imageUrl : null, res, 'private, max-age=31536000, immutable');
 }
 
 // POST /api/chats/:roomId/messages   body: { text }
@@ -2125,6 +2145,7 @@ module.exports = {
   listPendingForMe,
   getOrCreateDirectRoom,
   listMessages,
+  getChatImage,
   sendTextMessage,
   sendImageMessage,
   sendReservationRequest,

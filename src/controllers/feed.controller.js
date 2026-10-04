@@ -1,4 +1,5 @@
 const crypto = require('crypto');
+const { Prisma } = require('@prisma/client');
 const prisma = require('../lib/prisma');
 const { safeFindOrCreatePlace, recordPlaceEvent } = require('../lib/places');
 const { distanceKm } = require('../lib/geo');
@@ -40,9 +41,9 @@ function serializeAuthor(author) {
     id: author.id,
     username: author.username,
     name: author.name,
-    hasAvatar: !!author.profileImageUrl,
+    hasAvatar: author.hasAvatar ?? !!author.profileImageUrl,
     reviewNickname: author.reviewNickname || null,
-    hasReviewAvatar: !!author.reviewAvatarUrl,
+    hasReviewAvatar: author.hasReviewAvatar ?? !!author.reviewAvatarUrl,
   };
 }
 
@@ -59,11 +60,12 @@ function apiOrigin(req) {
 }
 function photoUrls(req, postId, photos) {
   if (!req) return photos;
+  return photoUrlsFromHashes(req, postId, photos.map((p) => crypto.createHash('md5').update(p).digest('hex').slice(0, 10)));
+}
+// 해시를 DB에서 미리 계산해온 경우(목록) - 사진 원본을 서버로 안 가져와도 똑같은 주소가 나옴
+function photoUrlsFromHashes(req, postId, hashes) {
   const origin = apiOrigin(req);
-  return photos.map((p, i) => {
-    const v = crypto.createHash('md5').update(p).digest('hex').slice(0, 10);
-    return `${origin}/api/feed-photos/${postId}/${i}?v=${v}`;
-  });
+  return hashes.map((v, i) => `${origin}/api/feed-photos/${postId}/${i}?v=${v}`);
 }
 // 수정할 때 프론트가 기존 사진을 위 주소 그대로 돌려보내면, 이 게시물에 저장돼 있던 원본으로 되바꿔줌
 function resolvePhotoRefs(postId, existingPhotos, photos) {
@@ -78,9 +80,11 @@ function resolvePhotoRefs(postId, existingPhotos, photos) {
 // GET /api/feed-photos/:postId/:idx - 로그인 없이 열어둠 (<img> 태그는 인증 헤더를 못 보내서). 아바타와 같은 방식
 async function getFeedPhoto(req, res) {
   const { serveBase64Image } = require('./avatar.controller');
-  const post = await prisma.feedPost.findUnique({ where: { id: req.params.postId }, select: { photos: true } });
   const idx = parseInt(req.params.idx, 10);
-  return serveBase64Image(post && Number.isInteger(idx) ? (post.photos || [])[idx] : null, res);
+  if (!Number.isInteger(idx) || idx < 0 || idx >= MAX_PHOTOS) return res.status(404).end();
+  // 게시물 사진 전체(최대 5장) 대신 필요한 한 장만 DB에서 꺼냄 (Postgres 배열은 1부터 셈)
+  const rows = await prisma.$queryRaw`SELECT photos[${idx + 1}::int] AS photo FROM feed_posts WHERE id = ${req.params.postId}`;
+  return serveBase64Image(rows[0] ? rows[0].photo : null, res);
 }
 
 function serializePost(post, myUserId, req) {
@@ -105,7 +109,7 @@ function serializePost(post, myUserId, req) {
     rating: post.rating,
     avgRating: avgRating !== null ? Math.round(avgRating * 10) / 10 : null,
     ratingCount: allRatings.length,
-    photos: photoUrls(req, post.id, post.photos || []),
+    photos: post.photoHashes ? photoUrlsFromHashes(req, post.id, post.photoHashes) : photoUrls(req, post.id, post.photos || []),
     tags: post.tags || [],
     fromMeetup: !!post.fromMeetup,
     likeCount: post._count ? post._count.likes : likes.length,
@@ -133,6 +137,35 @@ function serializeComment(comment) {
   };
 }
 
+const FEED_POST_FIELDS_WITHOUT_PHOTOS = Object.fromEntries(
+  Object.keys(Prisma.FeedPostScalarFieldEnum).filter((k) => k !== 'photos').map((k) => [k, true])
+);
+
+// 게시물들에 사진 해시(photoHashes)와 작성자 프로필 사진 유무(hasAvatar/hasReviewAvatar)를 붙임 - 원본은 DB 밖으로 안 꺼냄
+async function attachMediaInfo(posts) {
+  if (posts.length === 0) return;
+  const postIds = posts.map((p) => p.id);
+  const authorIds = [...new Set(posts.map((p) => p.authorId))];
+  const [photoRows, authorRows] = await Promise.all([
+    prisma.$queryRaw`
+      SELECT id, ARRAY(SELECT substr(md5(p), 1, 10) FROM unnest(photos) WITH ORDINALITY AS t(p, o) ORDER BY o) AS "hashes"
+      FROM feed_posts WHERE id = ANY(${postIds})`,
+    prisma.$queryRaw`
+      SELECT id, "profileImageUrl" IS NOT NULL AS "hasAvatar", "reviewAvatarUrl" IS NOT NULL AS "hasReviewAvatar"
+      FROM users WHERE id = ANY(${authorIds})`,
+  ]);
+  const hashesById = new Map(photoRows.map((r) => [r.id, r.hashes || []]));
+  const authorById = new Map(authorRows.map((r) => [r.id, r]));
+  for (const p of posts) {
+    p.photoHashes = hashesById.get(p.id) || [];
+    const a = authorById.get(p.authorId);
+    if (p.author && a) {
+      p.author.hasAvatar = a.hasAvatar;
+      p.author.hasReviewAvatar = a.hasReviewAvatar;
+    }
+  }
+}
+
 // GET /api/feed?category=&lat=&lon=&radiusKm=&q=&sort=recent|popular|rating
 // 게시물을 하나하나 독립적으로 반환함 (더 이상 장소 단위로 묶지 않음 - 같은 가게라도 쓴 사람마다 각자 카드로 뜸).
 async function listFeedPosts(req, res) {
@@ -150,11 +183,14 @@ async function listFeedPosts(req, res) {
     ];
   }
 
-  const posts = await prisma.feedPost.findMany({
+  // 예전엔 모든 게시물의 사진 원본(최대 5장)과 작성자 프로필 사진 원본까지 서버로 다 읽어왔다가 버렸음 -
+  // 글이 쌓이면 서버 메모리가 모자랄 수 있어서, 사진은 빼고 읽고 필요한 값(사진 해시, 프로필 사진 유무)만 DB에서 계산해옴
+  let posts = await prisma.feedPost.findMany({
     where,
-    include: {
-      author: { select: { id: true, username: true, name: true, profileImageUrl: true, reviewNickname: true, reviewAvatarUrl: true } },
-      place: true,
+    select: {
+      ...FEED_POST_FIELDS_WITHOUT_PHOTOS,
+      author: { select: { id: true, username: true, name: true, reviewNickname: true } },
+      place: { select: { name: true, category: true, location: true, lat: true, lon: true } },
       likes: { select: { userId: true } },
       comments: { select: { rating: true } },
       _count: { select: { likes: true, comments: true } },
@@ -162,14 +198,19 @@ async function listFeedPosts(req, res) {
     orderBy: { createdAt: 'desc' },
   });
 
-  let result = posts.map((p) => serializePost(p, req.userId, req));
-
   if (hasLocation) {
     // 위치가 없는 게시물(직접 입력만 하고 검색으로 안 고른 경우)은 반경 필터링 대상에서 제외됨
-    result = result
-      .filter((p) => typeof p.lat === 'number' && typeof p.lon === 'number')
-      .map((p) => ({ ...p, distanceKm: distanceKm(lat, lon, p.lat, p.lon) }))
-      .filter((p) => p.distanceKm <= radiusKm);
+    posts = posts.filter((p) => {
+      const pLat = p.lat ?? (p.place ? p.place.lat : null);
+      const pLon = p.lon ?? (p.place ? p.place.lon : null);
+      return typeof pLat === 'number' && typeof pLon === 'number' && distanceKm(lat, lon, pLat, pLon) <= radiusKm;
+    });
+  }
+
+  await attachMediaInfo(posts);
+  let result = posts.map((p) => serializePost(p, req.userId, req));
+  if (hasLocation) {
+    result = result.map((p) => ({ ...p, distanceKm: distanceKm(lat, lon, p.lat, p.lon) }));
   }
 
   result.sort((a, b) => {

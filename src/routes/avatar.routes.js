@@ -3,7 +3,9 @@ const { getUserAvatar, getUserReviewAvatar } = require('../controllers/avatar.co
 
 const router = express.Router();
 
-router.get('/:userId/avatar', getUserAvatar);
-router.get('/:userId/review-avatar', getUserReviewAvatar);
+const wrap = (fn) => (req, res, next) => fn(req, res).catch(next);
+
+router.get('/:userId/avatar', wrap(getUserAvatar));
+router.get('/:userId/review-avatar', wrap(getUserReviewAvatar));
 
 module.exports = router;
