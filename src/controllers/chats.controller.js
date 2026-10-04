@@ -2118,6 +2118,9 @@ async function listPendingForMe(req, res) {
 }
 
 module.exports = {
+  // 초대 링크 약속에서도 같은 방식으로 "예약 가능" 시간을 정리/복원하려고 내보냄
+  clearAvailabilityInRange,
+  restoreAvailabilityInRange,
   listChatRooms,
   listPendingForMe,
   getOrCreateDirectRoom,

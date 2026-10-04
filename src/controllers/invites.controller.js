@@ -2,6 +2,8 @@ const crypto = require('crypto');
 const prisma = require('../lib/prisma');
 const { getIo } = require('../lib/socket');
 const { pushInBackground } = require('../lib/push');
+const { hasConfirmedAppointmentOverlap } = require('../lib/bookable');
+const { clearAvailabilityInRange, restoreAvailabilityInRange } = require('./chats.controller');
 
 // 약속 초대 링크 - 만든 사람(회원)이 날짜/시간 범위를 정해 링크를 만들고,
 // 링크를 받은 사람은 회원가입 없이 이름 + 가능한 1시간 칸을 골라 제출함.
@@ -431,6 +433,12 @@ async function confirmInvite(req, res) {
 
     const confirmedStart = kstDate(date, startMin / 60);
     const confirmedEnd = kstDate(date, endMin / 60);
+    if (confirmedStart.getTime() < Date.now()) {
+      return res.status(400).json({ message: '이미 지난 시간으로는 확정할 수 없어요.' });
+    }
+    if (await hasConfirmedAppointmentOverlap([req.userId], confirmedStart, confirmedEnd)) {
+      return res.status(409).json({ message: '이 시간에 이미 확정된 다른 약속이 있어요.' });
+    }
 
     const result = await prisma.$transaction(async (tx) => {
       const changed = await tx.invitePoll.updateMany({
@@ -440,6 +448,8 @@ async function confirmInvite(req, res) {
       if (changed.count === 0) return null;
       const confirmed = { ...poll, confirmedStart, confirmedEnd };
       const memberIds = [...new Set([poll.creatorId, ...poll.responses.filter((r) => r.userId).map((r) => r.userId)])];
+      // 채팅에서 확정할 때처럼, 확정된 시간과 겹치는 "예약 가능" 표시는 정리 (같은 시간에 "예약 가능"이랑 "약속"이 같이 남지 않게)
+      await clearAvailabilityInRange(memberIds, confirmedStart, confirmedEnd, tx);
       for (const uid of memberIds) await addConfirmedEvent(tx, confirmed, uid);
       return memberIds;
     });
@@ -462,14 +472,46 @@ async function confirmInvite(req, res) {
   }
 }
 
-// POST /api/invites/:token/cancel  (만든 사람만, 확정 전까지만)
+// POST /api/invites/:token/cancel  (만든 사람만)
+// 응답 받는 중이면 그냥 닫고, 이미 확정된 약속이면 모두의 캘린더에서 지우고 회원 참여자에게 알림
 async function cancelInvite(req, res) {
   try {
     const poll = await findPollByToken(req.params.token);
     if (!poll) return res.status(404).json({ message: '초대 링크를 찾을 수 없어요.' });
     if (poll.creatorId !== req.userId) return res.status(403).json({ message: '약속을 만든 사람만 취소할 수 있어요.' });
-    const changed = await prisma.invitePoll.updateMany({ where: { id: poll.id, status: 'OPEN' }, data: { status: 'CANCELLED' } });
-    if (changed.count === 0) return res.status(409).json({ message: '이미 확정됐거나 취소된 약속이에요.' });
+    if (poll.status === 'CANCELLED') return res.status(409).json({ message: '이미 취소된 약속이에요.' });
+
+    let notifyIds = [];
+    if (poll.status === 'CONFIRMED') {
+      const memberIds = [...new Set([poll.creatorId, ...poll.responses.filter((r) => r.userId).map((r) => r.userId)])];
+      const title = confirmedEventTitle(poll);
+      const done = await prisma.$transaction(async (tx) => {
+        const changed = await tx.invitePoll.updateMany({ where: { id: poll.id, status: 'CONFIRMED' }, data: { status: 'CANCELLED' } });
+        if (changed.count === 0) return false;
+        // 확정할 때 addConfirmedEvent로 만든 일정(같은 사람·시간·제목)을 지우고, 원래 열어둔 시간이었으면 다시 예약 가능으로 복원
+        await tx.event.deleteMany({
+          where: { userId: { in: memberIds }, startTime: poll.confirmedStart, endTime: poll.confirmedEnd, title, sourceMessageId: null },
+        });
+        for (const uid of memberIds) {
+          await restoreAvailabilityInRange(uid, poll.confirmedStart, poll.confirmedEnd, tx);
+        }
+        return true;
+      });
+      if (!done) return res.status(409).json({ message: '이미 취소된 약속이에요.' });
+      notifyIds = memberIds.filter((uid) => uid !== req.userId);
+    } else {
+      const changed = await prisma.invitePoll.updateMany({ where: { id: poll.id, status: 'OPEN' }, data: { status: 'CANCELLED' } });
+      if (changed.count === 0) return res.status(409).json({ message: '이미 확정됐거나 취소된 약속이에요.' });
+    }
+
+    notifyIds.forEach((uid) => notifyUser(uid, 'inviteUpdated', { token: poll.token, title: poll.title, kind: 'cancelled' }));
+    if (notifyIds.length) {
+      pushInBackground(notifyIds, {
+        title: 'CATCHME',
+        body: `'${poll.title}' 약속이 취소됐어요`,
+        data: { type: 'invite', token: poll.token },
+      });
+    }
     const updated = await findPollByToken(poll.token);
     res.json({ invite: serializePoll(updated, { userId: req.userId }) });
   } catch (err) {

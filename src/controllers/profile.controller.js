@@ -1,5 +1,6 @@
 const bcrypt = require('bcryptjs');
 const prisma = require('../lib/prisma');
+const { disconnectUser } = require('../lib/socket');
 const { toPublicUser } = require('./auth.controller');
 const { USERNAME_RE, PHONE_RE, isAllowedImageDataUrl } = require('../lib/validators');
 
@@ -127,6 +128,7 @@ async function deleteAccount(req, res) {
   }
 
   await prisma.user.delete({ where: { id: req.userId } });
+  disconnectUser(req.userId); // 탈퇴한 계정의 다른 기기 실시간 연결도 끊음
   return res.json({ message: '계정이 삭제됐어요.' });
 }
 

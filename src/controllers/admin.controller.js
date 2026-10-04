@@ -1,4 +1,5 @@
 const prisma = require('../lib/prisma');
+const { disconnectUser } = require('../lib/socket');
 
 // 관리자 행동 기록 - 실패해도(로그 자체 오류) 원래 하려던 작업까지 막지는 않도록 에러를 삼킴
 async function logAdminAction(actorId, action, { targetType, targetId, detail } = {}) {
@@ -118,6 +119,7 @@ async function suspendUser(req, res) {
 
   // 정지된 계정은 현재 로그인 세션도 전부 끊어서, 이미 로그인돼있어도 다음 요청부터 다시 로그인해야 함
   await prisma.refreshToken.deleteMany({ where: { userId: id } });
+  disconnectUser(id); // 이미 열려있는 실시간 연결도 바로 끊음
   await logAdminAction(req.userId, 'SUSPEND_USER', { targetType: 'USER', targetId: id, detail: `@${target.username}${trimmedReason ? ` - ${trimmedReason}` : ''}` });
 
   return res.json({ message: '계정을 정지시켰어요.', user: serializeAdminUser(user) });
@@ -146,6 +148,7 @@ async function deleteUser(req, res) {
 
   try {
     await prisma.user.delete({ where: { id } });
+    disconnectUser(id);
     await logAdminAction(req.userId, 'DELETE_USER', { targetType: 'USER', targetId: id, detail: `@${target.username}` });
     return res.json({ message: '계정을 삭제했어요.' });
   } catch (err) {

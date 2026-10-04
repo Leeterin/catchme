@@ -15,6 +15,7 @@ const cors = require('cors');
 const helmet = require('helmet');
 const jwt = require('jsonwebtoken');
 const { Server } = require('socket.io');
+const prisma = require('./lib/prisma');
 
 const authRoutes = require('./routes/auth.routes');
 const friendsRoutes = require('./routes/friends.routes');
@@ -68,16 +69,24 @@ const io = new Server(httpServer, {
 
 // 소켓 연결 시 로그인 토큰(JWT)으로 신원 확인 -> 이 사람 전용 방("user:유저id")에 넣어둠.
 // 나중에 새 메시지가 생기면 io.to(`user:상대방id`).emit(...) 으로 그 사람에게만 실시간 전달.
-io.use((socket, next) => {
+io.use(async (socket, next) => {
   const token = socket.handshake.auth && socket.handshake.auth.token;
   if (!token) return next(new Error('unauthorized'));
+  let payload;
   try {
-    const payload = jwt.verify(token, process.env.JWT_SECRET);
-    socket.userId = payload.sub;
-    next();
+    payload = jwt.verify(token, process.env.JWT_SECRET);
   } catch (err) {
-    next(new Error('unauthorized'));
+    return next(new Error('unauthorized'));
   }
+  try {
+    // 탈퇴했거나 정지된 계정은 (토큰이 아직 안 만료됐어도) 실시간 연결을 받지 않음
+    const user = await prisma.user.findUnique({ where: { id: payload.sub }, select: { isSuspended: true } });
+    if (!user || user.isSuspended) return next(new Error('unauthorized'));
+  } catch (err) {
+    return next(new Error('unavailable'));
+  }
+  socket.userId = payload.sub;
+  return next();
 });
 
 io.on('connection', (socket) => {

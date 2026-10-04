@@ -91,7 +91,18 @@ async function hasConfirmedAppointmentOverlap(userIds, start, end, excludeMessag
     },
     select: { id: true },
   });
-  return !!found;
+  if (found) return true;
+  // 초대 링크로 확정된 약속 - 캘린더 일정에 출처 표시가 없어서 초대 쪽에서 직접 확인 (만든 사람이거나 회원으로 응답한 사람)
+  const invite = await prisma.invitePoll.findFirst({
+    where: {
+      status: 'CONFIRMED',
+      confirmedStart: { lt: end },
+      confirmedEnd: { gt: start },
+      OR: [{ creatorId: { in: userIds } }, { responses: { some: { userId: { in: userIds } } } }],
+    },
+    select: { id: true },
+  });
+  return !!invite;
 }
 
 module.exports = { occurrenceOnDate, isRangeBookableFor, hasConfirmedAppointmentOverlap };
