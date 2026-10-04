@@ -248,6 +248,16 @@ async function resolveReport(req, res) {
     return res.json({ message: '확인 완료로 처리했어요.' });
   }
 
+  // 이미 처리/반려한 신고를 다시 대기중·처리됨·반려됨으로 되돌림 (상태만 바꾸고 정지·삭제는 건드리지 않음)
+  if (action === 'SET_STATUS') {
+    const STATUS_LABEL = { PENDING: '대기중', REVIEWED: '처리됨', DISMISSED: '반려됨' };
+    const nextStatus = req.body.status;
+    if (!STATUS_LABEL[nextStatus]) return res.status(400).json({ message: '올바르지 않은 상태예요.' });
+    await prisma.report.update({ where: { id }, data: { status: nextStatus } });
+    await logAdminAction(req.userId, 'RESOLVE_REPORT', { targetType: 'REPORT', targetId: id, detail: `상태 변경 → ${STATUS_LABEL[nextStatus]}` });
+    return res.json({ message: `${STATUS_LABEL[nextStatus]}(으)로 바꿨어요.` });
+  }
+
   if (action === 'DISMISS') {
     await prisma.report.update({ where: { id }, data: { status: 'DISMISSED' } });
     await logAdminAction(req.userId, 'RESOLVE_REPORT', { targetType: 'REPORT', targetId: id, detail: '반려' });

@@ -574,7 +574,9 @@
                   : r.targetType === 'USER'
                   ? `<button class="danger" data-action="suspend-user">유저 정지</button>`
                   : `<button class="danger" data-action="delete-content">콘텐츠 삭제</button>`}
-              ` : ''}
+              ` : ['PENDING', 'REVIEWED', 'DISMISSED'].filter((s) => s !== r.status).map((s) =>
+                `<button data-action="set-status" data-status="${s}">${REPORT_STATUS_LABEL[s]}으로</button>`
+              ).join('')}
             </div>
           </div>
         `).join('');
@@ -664,6 +666,16 @@
           loadReports(reportPage);
         } catch(err) { showToast(err.message); }
       });
+      row.querySelectorAll('[data-action="set-status"]').forEach((btn) => btn.addEventListener('click', async () => {
+        const label = REPORT_STATUS_LABEL[btn.dataset.status];
+        const result = await confirmModal('신고 상태 변경', `이 신고를 '${label}'(으)로 바꿀까요?\n이미 한 유저 정지·콘텐츠 삭제는 되돌려지지 않아요.`, { confirmLabel: '바꾸기', danger: false });
+        if(!result.confirmed) return;
+        try {
+          await apiRequest(`/admin/reports/${id}/resolve`, { method: 'POST', body: JSON.stringify({ action: 'SET_STATUS', status: btn.dataset.status }) });
+          showToast(`'${label}'(으)로 바꿨어요.`);
+          loadReports(reportPage);
+        } catch(err) { showToast(err.message); }
+      }));
       if(detailBtn) detailBtn.addEventListener('click', () => showReportDetail(id));
       if(dismissBtn) dismissBtn.addEventListener('click', async () => {
         const result = await confirmModal('신고 반려', '이 신고를 반려 처리할까요?', { confirmLabel: '반려하기', danger: false });
