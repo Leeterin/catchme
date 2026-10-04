@@ -223,10 +223,28 @@ async function findPollByToken(token) {
 }
 
 // 일용 링크로 잡힌 약속은 캘린더에서 바로 구분되게 앞에 💼를 붙임
-function confirmedEventTitle(poll) {
+function confirmedEventBaseTitle(poll) {
   const raw = poll.title.length > 40 ? poll.title.slice(0, 40) : poll.title;
   const base = poll.audience === 'work' ? `💼 ${raw}` : raw;
   return poll.placeName ? `${base} @ ${poll.placeName}`.slice(0, 80) : base;
+}
+
+// 이 사람 캘린더에 들어갈 제목 - 누구와의 약속인지 앞에 붙임 (예: "민지님과 약속 - 커피 한잔")
+// 만든 사람에겐 응답한 사람들 이름, 응답한 사람에겐 만든 사람(+다른 응답자) 이름
+function confirmedEventTitle(poll, userId) {
+  const base = confirmedEventBaseTitle(poll);
+  const others = [];
+  if (poll.creatorId !== userId && poll.creator && poll.creator.name) others.push(poll.creator.name);
+  (poll.responses || []).forEach((r) => {
+    if (userId && r.userId === userId) return;
+    if (r.name) others.push(r.name);
+  });
+  if (others.length === 0) return base;
+  // "님"·"명" 모두 받침이 있어서 조사는 항상 "과"
+  const who = others.length === 1 ? `${others[0]}님`
+    : others.length === 2 ? `${others[0]}님, ${others[1]}님`
+      : `${others[0]}님 외 ${others.length - 1}명`;
+  return `${who}과 약속 - ${base}`;
 }
 
 // { name, address, lat, lon } -> 저장할 값 (이름이 없으면 장소 없음)
@@ -249,7 +267,7 @@ function parsePlace(raw) {
 // 확정된 약속을 이 사람 캘린더에 넣음 (같은 시간/제목으로 이미 있으면 다시 만들지 않음)
 async function addConfirmedEvent(db, poll, userId) {
   if (!poll.confirmedStart || !poll.confirmedEnd) return;
-  const title = confirmedEventTitle(poll);
+  const title = confirmedEventTitle(poll, userId);
   const exists = await db.event.findFirst({
     where: { userId, startTime: poll.confirmedStart, endTime: poll.confirmedEnd, title },
     select: { id: true },
@@ -502,13 +520,17 @@ async function cancelInvite(req, res) {
     let notifyIds = [];
     if (poll.status === 'CONFIRMED') {
       const memberIds = [...new Set([poll.creatorId, ...poll.responses.filter((r) => r.userId).map((r) => r.userId)])];
-      const title = confirmedEventTitle(poll);
+      const base = confirmedEventBaseTitle(poll);
       const done = await prisma.$transaction(async (tx) => {
         const changed = await tx.invitePoll.updateMany({ where: { id: poll.id, status: 'CONFIRMED' }, data: { status: 'CANCELLED' } });
         if (changed.count === 0) return false;
         // 확정할 때 addConfirmedEvent로 만든 일정(같은 사람·시간·제목)을 지우고, 원래 열어둔 시간이었으면 다시 예약 가능으로 복원
+        // 제목 앞의 이름은 그 사이 프로필 이름이 바뀌었을 수 있어서 뒷부분(" 약속 - 약속이름")으로 찾고, 이름이 안 붙던 예전 일정도 같이 지움
         await tx.event.deleteMany({
-          where: { userId: { in: memberIds }, startTime: poll.confirmedStart, endTime: poll.confirmedEnd, title, sourceMessageId: null },
+          where: {
+            userId: { in: memberIds }, startTime: poll.confirmedStart, endTime: poll.confirmedEnd, sourceMessageId: null,
+            OR: [{ title: base }, { title: { endsWith: `과 약속 - ${base}` } }],
+          },
         });
         for (const uid of memberIds) {
           await restoreAvailabilityInRange(uid, poll.confirmedStart, poll.confirmedEnd, tx);
@@ -552,12 +574,13 @@ async function claimInvite(req, res) {
     if (!mine.userId) {
       await prisma.inviteResponse.update({ where: { id: mine.id }, data: { userId: req.userId } });
     }
+    // 방금 연결한 내 응답이 반영된 상태로 다시 읽어야 캘린더 제목에 내 이름이 상대 목록으로 안 들어감
+    const updated = await findPollByToken(poll.token);
     let addedToCalendar = false;
-    if (poll.status === 'CONFIRMED' && poll.creatorId !== req.userId) {
-      await addConfirmedEvent(prisma, poll, req.userId);
+    if (updated.status === 'CONFIRMED' && updated.creatorId !== req.userId) {
+      await addConfirmedEvent(prisma, updated, req.userId);
       addedToCalendar = true;
     }
-    const updated = await findPollByToken(poll.token);
     res.json({ invite: serializePoll(updated, { userId: req.userId, guestKey, openCells: await openCellsForPoll(updated) }), addedToCalendar });
   } catch (err) {
     console.error('[claimInvite]', err);
