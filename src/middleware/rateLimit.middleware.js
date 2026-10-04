@@ -76,7 +76,17 @@ const inviteLimiter = rateLimit({
   message: { message: '너무 자주 시도하고 있어요. 잠시 후 다시 시도해주세요.' },
 });
 
+// 아이디 검색 - 한 글자씩 바꿔가며 회원 목록을 긁어가지 못하게. 입력할 때마다 검색하므로 넉넉하게 IP 하나당 1분에 60번
+const userSearchLimiter = rateLimit({
+  windowMs: 60 * 1000,
+  limit: 60,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { message: '검색을 너무 자주 했어요. 잠시 후 다시 시도해주세요.' },
+});
+
 module.exports = {
+  userSearchLimiter,
   inviteLimiter,
   loginLimiter,
   signupLimiter,

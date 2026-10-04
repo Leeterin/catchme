@@ -1,6 +1,6 @@
 const express = require('express');
 const { requireAuth } = require('../middleware/auth.middleware');
-const { writeLimiter } = require('../middleware/rateLimit.middleware');
+const { writeLimiter, userSearchLimiter } = require('../middleware/rateLimit.middleware');
 const {
   searchUsers,
   listFriends,
@@ -27,7 +27,7 @@ const router = express.Router();
 // 이 라우터 아래 모든 엔드포인트는 로그인이 필요함
 router.use(requireAuth);
 
-router.get('/search', searchUsers);
+router.get('/search', userSearchLimiter, searchUsers);
 router.get('/nearby', nearbyFriends); // '/'보다 먼저 등록
 router.get('/', listFriends);
 router.get('/requests', listRequests);

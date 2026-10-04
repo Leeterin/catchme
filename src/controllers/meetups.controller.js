@@ -1,5 +1,5 @@
 const prisma = require('../lib/prisma');
-const { distanceKm } = require('../lib/geo');
+const { distanceKm, fuzzyDistanceKm, clampNearbyRadius } = require('../lib/geo');
 const { getIo } = require('../lib/socket');
 
 // 특정 유저한테 실시간 알림을 보냄 (접속중이 아니면 조용히 무시됨)
@@ -370,10 +370,11 @@ async function suggestedFriends(req, res) {
   );
 
   if (!Number.isNaN(lat) && !Number.isNaN(lon)) {
-    const radiusKm = parseFloat(req.query.radiusKm) || 5;
+    const radiusKm = clampNearbyRadius(req.query.radiusKm);
     const nearbyUsers = await prisma.user.findMany({
       where: {
         id: { notIn: [req.userId, ...excluded] },
+        locationSharing: true, // 위치 공유에 동의한 사람만 ("현위치"만 저장해둔 사람은 제외)
         lastLat: { not: null },
         lastLon: { not: null },
         OR: [{ settings: null }, { settings: { friendSearchAllow: true } }],
@@ -391,7 +392,7 @@ async function suggestedFriends(req, res) {
       .filter((u) => !blockedIds.has(u.id))
       .map((u) => ({
         id: u.id, username: u.username, name: u.name, hasAvatar: !!u.profileImageUrl,
-        distanceKm: distanceKm(lat, lon, u.lastLat, u.lastLon),
+        distanceKm: fuzzyDistanceKm(lat, lon, u.lastLat, u.lastLon),
       }))
       .filter((u) => u.distanceKm <= radiusKm)
       .sort((a, b) => a.distanceKm - b.distanceKm)

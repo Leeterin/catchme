@@ -194,26 +194,37 @@ async function getMe(req, res) {
 }
 
 // 소셜 로그인(카카오/네이버)으로 들어온 사람을 기존 계정과 연결하거나 새 계정을 만듦
-async function findOrCreateSocialUser({ provider, providerId, email, name }) {
+// emailVerified: 소셜 쪽에서 "이 사람이 진짜 그 이메일 주인"임이 확인된 경우만 true.
+// 확인 안 된 이메일로 기존 계정에 연결해주면, 남의 이메일을 (인증 없이) 카카오 계정에 적어두는 것만으로 그 사람 계정에 들어갈 수 있음
+async function findOrCreateSocialUser({ provider, providerId, email, emailVerified, name }) {
   const idField = provider === 'kakao' ? 'kakaoId' : 'naverId';
   let user = await prisma.user.findUnique({ where: { [idField]: providerId } });
+  const normalizedEmail = email ? email.toLowerCase() : null;
 
-  if (!user && email) {
-    // 같은 이메일로 이미 가입된 계정이 있으면, 그 계정에 소셜 로그인만 새로 연결
-    const existingByEmail = await prisma.user.findUnique({ where: { email: email.toLowerCase() } });
+  if (!user && normalizedEmail && emailVerified) {
+    // 같은 (인증된) 이메일로 이미 가입된 계정이 있으면, 그 계정에 소셜 로그인만 새로 연결
+    const existingByEmail = await prisma.user.findUnique({ where: { email: normalizedEmail } });
     if (existingByEmail) {
+      if (existingByEmail.isSuspended) throw suspendedError();
       user = await prisma.user.update({ where: { id: existingByEmail.id }, data: { [idField]: providerId } });
     }
   }
+
+  if (user && user.isSuspended) throw suspendedError();
 
   if (!user) {
     let username = `${provider}_${providerId}`.slice(0, 20);
     const dupe = await prisma.user.findUnique({ where: { username } });
     if (dupe) username = `${username}_${Date.now().toString().slice(-4)}`;
 
+    // 인증 안 된 이메일이 이미 다른 계정에서 쓰이고 있으면 그 이메일은 쓰지 않음 (연결도 안 하고, 중복 오류도 안 나게)
+    const emailTaken = normalizedEmail
+      ? !!(await prisma.user.findUnique({ where: { email: normalizedEmail }, select: { id: true } }))
+      : false;
+
     user = await prisma.user.create({
       data: {
-        email: email ? email.toLowerCase() : `${username}@${provider}.catchme.local`,
+        email: normalizedEmail && !emailTaken ? normalizedEmail : `${username}@${provider}.catchme.local`,
         username,
         name: name || (provider === 'kakao' ? '카카오 사용자' : '네이버 사용자'),
         passwordHash: null,
@@ -227,9 +238,42 @@ async function findOrCreateSocialUser({ provider, providerId, email, name }) {
   return { token, refreshToken };
 }
 
+function suspendedError() {
+  return Object.assign(new Error('suspended account'), { code: 'SUSPENDED' });
+}
+
+// 소셜 로그인 state(위조 방지 값): 로그인 시작할 때 쿠키에 넣어두고, 돌아왔을 때 주소의 state와 같은지 확인.
+// 안 하면 남이 시작한 로그인 링크를 눌렀을 때 그 사람 계정으로 로그인되는 공격(로그인 CSRF)이 가능함.
+// 로그인 시작 → 카카오/네이버 → 콜백이 모두 같은 브라우저에서 이 서버 주소로 오가므로 쿠키가 그대로 따라옴
+const OAUTH_STATE_COOKIE = 'oauth_state';
+function issueOAuthState(res) {
+  const state = crypto.randomBytes(16).toString('hex');
+  res.cookie(OAUTH_STATE_COOKIE, state, {
+    httpOnly: true, secure: true, sameSite: 'lax', maxAge: 10 * 60 * 1000, path: '/api/auth',
+  });
+  return state;
+}
+function readCookie(req, name) {
+  const header = req.headers.cookie || '';
+  const found = header.split(';').map((c) => c.trim()).find((c) => c.startsWith(`${name}=`));
+  return found ? decodeURIComponent(found.slice(name.length + 1)) : null;
+}
+function checkOAuthState(req, res) {
+  const expected = readCookie(req, OAUTH_STATE_COOKIE);
+  res.clearCookie(OAUTH_STATE_COOKIE, { path: '/api/auth' });
+  const got = String(req.query.state || '');
+  if (!expected || !got || expected.length !== got.length) return false;
+  return crypto.timingSafeEqual(Buffer.from(expected), Buffer.from(got));
+}
+function socialErrorRedirect(res, frontendUrl, err, fallbackCode) {
+  if (err && err.code === 'SUSPENDED') return res.redirect(`${frontendUrl}?authError=suspended`);
+  return res.redirect(`${frontendUrl}?authError=${fallbackCode}`);
+}
+
 // GET /api/auth/kakao/login — 카카오 로그인 화면으로 리다이렉트
 function kakaoLoginRedirect(req, res) {
-  const url = `https://kauth.kakao.com/oauth/authorize?response_type=code&client_id=${process.env.KAKAO_REST_API_KEY}&redirect_uri=${encodeURIComponent(process.env.KAKAO_REDIRECT_URI)}`;
+  const state = issueOAuthState(res);
+  const url = `https://kauth.kakao.com/oauth/authorize?response_type=code&client_id=${process.env.KAKAO_REST_API_KEY}&redirect_uri=${encodeURIComponent(process.env.KAKAO_REDIRECT_URI)}&state=${state}`;
   res.redirect(url);
 }
 
@@ -238,6 +282,7 @@ async function kakaoCallback(req, res) {
   const { code } = req.query;
   const frontendUrl = process.env.FRONTEND_URL || '/';
   if (!code) return res.redirect(`${frontendUrl}?authError=missing_code`);
+  if (!checkOAuthState(req, res)) return res.redirect(`${frontendUrl}?authError=state_mismatch`);
 
   try {
     const tokenRes = await fetch('https://kauth.kakao.com/oauth/token', {
@@ -260,22 +305,24 @@ async function kakaoCallback(req, res) {
     const profile = await profileRes.json();
     const kakaoAccount = profile.kakao_account || {};
     const email = kakaoAccount.email || null;
+    // 카카오는 이메일을 인증 안 하고도 계정에 적어둘 수 있어서, 인증됐고(is_email_verified) 유효한(is_email_valid) 경우만 믿음
+    const emailVerified = kakaoAccount.is_email_verified === true && kakaoAccount.is_email_valid === true;
     const nickname = (kakaoAccount.profile && kakaoAccount.profile.nickname) || null;
 
     const { token, refreshToken } = await findOrCreateSocialUser({
-      provider: 'kakao', providerId: String(profile.id), email, name: nickname,
+      provider: 'kakao', providerId: String(profile.id), email, emailVerified, name: nickname,
     });
 
     return res.redirect(`${frontendUrl}#token=${token}&refreshToken=${refreshToken}`);
   } catch (err) {
-    console.error('[kakao callback] error:', err);
-    return res.redirect(`${frontendUrl}?authError=kakao_failed`);
+    if (err.code !== 'SUSPENDED') console.error('[kakao callback] error:', err);
+    return socialErrorRedirect(res, frontendUrl, err, 'kakao_failed');
   }
 }
 
 // GET /api/auth/naver/login — 네이버 로그인 화면으로 리다이렉트
 function naverLoginRedirect(req, res) {
-  const state = crypto.randomBytes(8).toString('hex');
+  const state = issueOAuthState(res);
   const url = `https://nid.naver.com/oauth2.0/authorize?response_type=code&client_id=${process.env.NAVER_LOGIN_CLIENT_ID}&redirect_uri=${encodeURIComponent(process.env.NAVER_REDIRECT_URI)}&state=${state}`;
   res.redirect(url);
 }
@@ -285,9 +332,10 @@ async function naverCallback(req, res) {
   const { code, state } = req.query;
   const frontendUrl = process.env.FRONTEND_URL || '/';
   if (!code) return res.redirect(`${frontendUrl}?authError=missing_code`);
+  if (!checkOAuthState(req, res)) return res.redirect(`${frontendUrl}?authError=state_mismatch`);
 
   try {
-    const tokenUrl = `https://nid.naver.com/oauth2.0/token?grant_type=authorization_code&client_id=${process.env.NAVER_LOGIN_CLIENT_ID}&client_secret=${process.env.NAVER_LOGIN_CLIENT_SECRET}&code=${code}&state=${state}`;
+    const tokenUrl = `https://nid.naver.com/oauth2.0/token?grant_type=authorization_code&client_id=${process.env.NAVER_LOGIN_CLIENT_ID}&client_secret=${process.env.NAVER_LOGIN_CLIENT_SECRET}&code=${encodeURIComponent(code)}&state=${encodeURIComponent(state)}`;
     const tokenRes = await fetch(tokenUrl);
     const tokenData = await tokenRes.json();
     if (!tokenData.access_token) throw new Error('네이버 토큰 발급 실패: ' + JSON.stringify(tokenData));
@@ -298,16 +346,18 @@ async function naverCallback(req, res) {
     const profileData = await profileRes.json();
     const p = profileData.response || {};
     const email = p.email || null;
+    // 네이버는 이메일 인증 여부를 따로 안 알려줌 - @naver.com 주소는 그 네이버 계정 자체의 메일이라 주인이 확실하니 그것만 믿음
+    const emailVerified = !!email && /@naver\.com$/i.test(email);
     const name = p.name || p.nickname || null;
 
     const { token, refreshToken } = await findOrCreateSocialUser({
-      provider: 'naver', providerId: String(p.id), email, name,
+      provider: 'naver', providerId: String(p.id), email, emailVerified, name,
     });
 
     return res.redirect(`${frontendUrl}#token=${token}&refreshToken=${refreshToken}`);
   } catch (err) {
-    console.error('[naver callback] error:', err);
-    return res.redirect(`${frontendUrl}?authError=naver_failed`);
+    if (err.code !== 'SUSPENDED') console.error('[naver callback] error:', err);
+    return socialErrorRedirect(res, frontendUrl, err, 'naver_failed');
   }
 }
 

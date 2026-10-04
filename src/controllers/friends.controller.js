@@ -1,7 +1,7 @@
 const prisma = require('../lib/prisma');
 const { getIo } = require('../lib/socket');
 const { pushInBackground } = require('../lib/push');
-const { distanceKm } = require('../lib/geo');
+const { fuzzyDistanceKm, clampNearbyRadius } = require('../lib/geo');
 
 // 특정 유저(userId)한테 실시간 알림을 보냄. 그 유저가 지금 접속중이 아니면 그냥 조용히 무시됨(다음 접속/새로고침 때 REST로 최신 상태를 받아가니까 문제없음)
 // 친구 요청(또는 자동 수락으로 바로 친구가 됨)을 받는 사람 휴대폰으로 푸시
@@ -51,7 +51,8 @@ function toPublicProfile(user) {
 // 아이디(username)로 유저를 검색. 본인 제외, "아이디로 검색 허용"을 꺼둔 사람도 제외.
 async function searchUsers(req, res) {
   const query = String(req.query.query || '').trim().toLowerCase();
-  if (!query) return res.json({ users: [] });
+  // 한 글자 검색은 회원 목록 긁어가기에 쓰일 수 있어서 두 글자부터 (아이디는 원래 3자 이상)
+  if (query.length < 2) return res.json({ users: [] });
 
   // 내가 차단했거나 나를 차단한 사람은 검색 결과에서도 안 보이게 함
   const blocks = await prisma.block.findMany({
@@ -140,7 +141,7 @@ async function listFriends(req, res) {
 async function nearbyFriends(req, res) {
   const lat = parseFloat(req.query.lat);
   const lon = parseFloat(req.query.lon);
-  const radiusKm = parseFloat(req.query.radiusKm) || 5;
+  const radiusKm = clampNearbyRadius(req.query.radiusKm);
   if (Number.isNaN(lat) || Number.isNaN(lon)) {
     return res.status(400).json({ message: '기준 위치 좌표가 필요해요.' });
   }
@@ -172,10 +173,11 @@ async function nearbyFriends(req, res) {
     .map((u) => ({
       ...toPublicProfile(u),
       isFriend: friendIdSet.has(u.id),
-      distanceKm: distanceKm(lat, lon, u.lastLat, u.lastLon),
+      distanceKm: fuzzyDistanceKm(lat, lon, u.lastLat, u.lastLon),
     }))
     .filter((u) => u.distanceKm <= radiusKm)
-    .sort((a, b) => a.distanceKm - b.distanceKm);
+    .sort((a, b) => a.distanceKm - b.distanceKm)
+    .slice(0, 50);
 
   return res.json({ users });
 }
