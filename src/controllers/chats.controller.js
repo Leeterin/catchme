@@ -2067,7 +2067,7 @@ async function listPendingForMe(req, res) {
         type: 'RESERVATION',
         reservationStatus: 'PENDING',
         senderId: { not: req.userId },
-        reservationEnd: { gt: now },
+        reservationStart: { gt: now }, // 시작 시간이 지난 요청은 이제 수락할 수 없으니 "답할 차례"에서 뺌
       },
       orderBy: { reservationStart: 'asc' },
       take: 20,
@@ -2079,7 +2079,7 @@ async function listPendingForMe(req, res) {
         type: 'TIME_PROPOSAL',
         proposalStatus: 'VOTING',
         senderId: { not: req.userId },
-        proposalOptions: { none: { votes: { some: { userId: req.userId } } } },
+        proposalOptions: { none: { votes: { some: { userId: req.userId } } }, some: { startTime: { gt: now } } }, // 후보가 전부 지난 투표는 뺌
       },
       orderBy: { createdAt: 'desc' },
       take: 20,

@@ -94,6 +94,11 @@ app.use(cors({ origin: corsOriginCheck }));
 // 특히 폰 카메라로 찍은 사진은 디테일이 많아 같은 해상도로 압축해도 컴퓨터 사진보다 용량이 커서 이 한도를 더 잘 넘었음.
 app.use(express.json({ limit: '10mb' }));
 
+// Render에서는 요청이 Cloudflare → Render 내부 프록시 → 컨테이너 안 프록시(::1) 3단계를 거쳐 들어옴 (2026-10-04 실제 확인).
+// 이 설정이 없으면 req.ip가 모든 사용자에게 똑같이 "::1"이라, 아래 IP별 요청 제한이 사용자 전체에 합쳐서 걸렸음
+// (예: 로그인 15분 10번이 "전체 사용자 합쳐서" 10번). 3단계만 믿으면 사용자가 X-Forwarded-For를 위조해도 실제 IP가 잡힘
+app.set('trust proxy', 3);
+
 // 전체 API에 대한 넓은 안전망 - IP 하나당 1분에 300번 넘게 요청하면 잠깐 막음 (봇/무한루프 방지용, 평소 정상 사용엔 영향 없음)
 const rateLimit = require('express-rate-limit');
 app.use('/api', rateLimit({
@@ -105,15 +110,6 @@ app.use('/api', rateLimit({
 }));
 
 app.get('/health', (req, res) => res.json({ ok: true }));
-// 임시: Render 프록시 구조 확인용 (확인 후 삭제)
-app.get('/health/ip-debug', (req, res) => res.json({
-  ip: req.ip,
-  remote: req.socket.remoteAddress,
-  xff: req.headers['x-forwarded-for'] || null,
-  trueClientIp: req.headers['true-client-ip'] || null,
-  cfConnectingIp: req.headers['cf-connecting-ip'] || null,
-  xRealIp: req.headers['x-real-ip'] || null,
-}));
 
 app.use('/api/auth', authRoutes);
 app.use('/api/friends', friendsRoutes);
