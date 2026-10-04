@@ -1,5 +1,7 @@
 const prisma = require('../lib/prisma');
 const { isBeforeRecurrenceStart } = require('../lib/bookable');
+const { fetchIcs } = require('../lib/icsFetch');
+const { track } = require('../lib/analytics');
 
 // 친구 일정 보기에서 쓰는 하루 시간 칸 (0~23시)
 const MATCH_HOURS = Array.from({ length: 24 }, (_, i) => i);
@@ -357,6 +359,7 @@ async function createEvent(req, res) {
       color: sanitizeEventColor(color) || null,
     },
   });
+  if (!sourceChatRoomId) track(req.userId, eventType === 'available' ? 'available_created' : 'event_created');
 
   return res.status(201).json({ event: serializeEvent(event) });
 }
@@ -642,4 +645,55 @@ async function getFriendMonthSchedule(req, res) {
   return res.json({ hours: MATCH_HOURS, days });
 }
 
-module.exports = { listEvents, getEvent, createEvent, updateEvent, deleteEvent, matchCalendar, getFriendDaySchedule, getFriendMonthSchedule };
+// POST /api/events/import   body: { source: 'device'|'ics', events: [{ title, startTime, endTime }] }
+// 휴대폰 캘린더/캘린더 주소에서 가져온 일정을 한 번에 저장. 전부 "바쁨" + "나만 보기"로 저장해서 친구에게는 제목 없이
+// '일정 있음'으로만 보임 (내 전체 일정은 공개하지 않는다는 원칙 - 다른 캘린더의 일정 제목이 그대로 친구에게 노출되면 안 됨).
+// 같은 걸 두 번 불러와도 안 겹치게, 이미 있는 내 일정과 제목·시작·종료가 똑같으면 건너뜀
+const IMPORT_MAX = 1000;
+async function importEvents(req, res) {
+  const list = Array.isArray(req.body && req.body.events) ? req.body.events.slice(0, IMPORT_MAX) : [];
+  const rows = [];
+  for (const e of list) {
+    if (!e || typeof e.title !== 'string') continue;
+    const title = e.title.trim().slice(0, 60) || '일정';
+    const start = new Date(e.startTime);
+    const end = new Date(e.endTime);
+    if (isNaN(start) || isNaN(end) || end <= start) continue;
+    if (end - start > 31 * 86400e3) continue; // 한 달 넘게 이어지는 일정은 사실상 표시용이라 빼둠
+    rows.push({ title, start, end });
+  }
+  if (rows.length === 0) return res.json({ created: 0, skipped: list.length });
+
+  const minStart = new Date(Math.min(...rows.map((r) => r.start.getTime())));
+  const maxEnd = new Date(Math.max(...rows.map((r) => r.end.getTime())));
+  const existing = await prisma.event.findMany({
+    where: { userId: req.userId, startTime: { gte: minStart }, endTime: { lte: maxEnd } },
+    select: { title: true, startTime: true, endTime: true },
+  });
+  const keyOf = (title, s, e) => `${title}|${s.getTime()}|${e.getTime()}`;
+  const seen = new Set(existing.map((x) => keyOf(x.title, x.startTime, x.endTime)));
+  const data = [];
+  for (const r of rows) {
+    const k = keyOf(r.title, r.start, r.end);
+    if (seen.has(k)) continue;
+    seen.add(k);
+    data.push({ userId: req.userId, title: r.title, startTime: r.start, endTime: r.end, status: 'BUSY', eventType: 'busy', visiblePrivate: true });
+  }
+  if (data.length) await prisma.event.createMany({ data });
+  track(req.userId, 'calendar_import', { source: req.body.source === 'device' ? 'device' : 'ics', created: data.length });
+  return res.status(201).json({ created: data.length, skipped: list.length - data.length });
+}
+
+// GET /api/events/ics?url=... - 캘린더 주소(ICS)를 대신 받아서 원문 그대로 돌려줌 (파싱은 프론트)
+async function fetchIcsProxy(req, res) {
+  try {
+    const text = await fetchIcs(req.query.url);
+    res.type('text/calendar').send(text);
+  } catch (err) {
+    if (err.status) return res.status(err.status).json({ message: err.message });
+    console.error('[ics] fetch failed:', err.message);
+    return res.status(400).json({ message: '캘린더를 불러오지 못했어요. 주소를 다시 확인해 주세요.' });
+  }
+}
+
+module.exports = { listEvents, getEvent, createEvent, updateEvent, deleteEvent, matchCalendar, getFriendDaySchedule, getFriendMonthSchedule, importEvents, fetchIcsProxy };

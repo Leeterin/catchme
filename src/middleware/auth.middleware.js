@@ -1,4 +1,5 @@
 const jwt = require('jsonwebtoken');
+const { markActive } = require('../lib/analytics');
 
 // Authorization: Bearer <token> 헤더를 검증해서 req.userId에 심어준다.
 // 아직 "로그인 유지"까지 다듬은 건 아니고, 친구 API가 동작하려면
@@ -14,6 +15,7 @@ function requireAuth(req, res, next) {
   try {
     const payload = jwt.verify(token, process.env.JWT_SECRET);
     req.userId = payload.sub;
+    markActive(req.userId); // 오늘 앱을 쓴 날로 기록 (재방문율 지표용, 하루 한 번만 씀)
     next();
   } catch (err) {
     return res.status(401).json({ message: '로그인이 만료됐어요. 다시 로그인해주세요.' });

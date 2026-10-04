@@ -85,6 +85,9 @@ model User {
   locationRecommendResponses    LocationRecommendResponse[]
   settings       UserSettings?
   pushTokens     PushToken[]
+  activeDays     UserActiveDay[]
+  analyticsEvents AnalyticsEvent[]
+  engagement     UserEngagement?
   blockedUsers   Block[] @relation("Blocker")
   blockedByUsers Block[] @relation("Blocked")
 
@@ -844,4 +847,47 @@ model PushToken {
 
   @@index([userId])
   @@map("push_tokens")
+}
+
+// ------------------------------------------------------------
+// 사용 지표 (활성화/재방문 측정용) - 관리자 페이지 "지표" 탭에서 봄
+// ------------------------------------------------------------
+
+// 하루에 한 번이라도 앱을 쓴 날 (한국 날짜 "YYYY-MM-DD"). D1/D7 재방문율 계산용
+model UserActiveDay {
+  userId String
+  user   User   @relation(fields: [userId], references: [id], onDelete: Cascade)
+  day    String
+
+  @@id([userId, day])
+  @@index([day])
+  @@map("user_active_days")
+}
+
+// 주요 행동 기록 (signup, first_event, calendar_import, invite_created, invite_responded, push_open 등)
+model AnalyticsEvent {
+  id        String   @id @default(uuid())
+  userId    String?
+  user      User?    @relation(fields: [userId], references: [id], onDelete: Cascade)
+  name      String
+  props     Json?
+  createdAt DateTime @default(now())
+
+  @@index([name, createdAt])
+  @@index([userId, name])
+  @@map("analytics_events")
+}
+
+// 정기 알림(아침 오늘 일정, 일요일 저녁 다음 주 시간 열기) 받을지 + 마지막으로 보낸 날
+// (같은 날 두 번 안 보내게 - 서버가 재시작되거나 여러 대여도 여기 기록으로 막음)
+model UserEngagement {
+  userId        String   @id
+  user          User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  morningBrief  Boolean  @default(true)
+  weeklyNudge   Boolean  @default(true)
+  lastMorningOn String?
+  lastWeeklyOn  String?
+  updatedAt     DateTime @updatedAt
+
+  @@map("user_engagement")
 }

@@ -2,6 +2,7 @@ const crypto = require('crypto');
 const prisma = require('../lib/prisma');
 const { getIo } = require('../lib/socket');
 const { pushInBackground } = require('../lib/push');
+const { track } = require('../lib/analytics');
 const { hasConfirmedAppointmentOverlap } = require('../lib/bookable');
 const { clearAvailabilityInRange, restoreAvailabilityInRange } = require('./chats.controller');
 
@@ -354,6 +355,7 @@ async function createInvite(req, res) {
       },
       include: POLL_INCLUDE,
     });
+    track(req.userId, 'invite_created', { fromCalendar, audience });
     res.status(201).json({ invite: serializePoll(poll, { userId: req.userId, openCells: await openCellsForPoll(poll) }) });
   } catch (err) {
     console.error('[createInvite]', err);
@@ -440,6 +442,16 @@ async function respondInvite(req, res) {
       name,
       kind: existing ? 'edited' : 'responded',
     });
+    if (!existing) {
+      // 링크를 보낸 사람이 앱으로 돌아오는 첫 계기 - 새 응답이 올 때마다 휴대폰 알림 (고친 응답은 조용히)
+      const count = updated ? updated.responses.length : 0;
+      pushInBackground([poll.creatorId], {
+        title: 'CATCHME',
+        body: `${name}님이 '${poll.title}'에 되는 시간을 보냈어요${count > 1 ? ` (지금 ${count}명 응답)` : ''}`,
+        data: { type: 'invite', token: poll.token },
+      });
+      track(req.userId || null, 'invite_responded', { guest: !req.userId, creatorId: poll.creatorId });
+    }
     res.json({ invite: serializePoll(updated, { userId: req.userId, guestKey, openCells }) });
   } catch (err) {
     console.error('[respondInvite]', err);

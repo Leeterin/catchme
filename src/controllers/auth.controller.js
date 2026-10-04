@@ -3,6 +3,7 @@ const jwt = require('jsonwebtoken');
 const crypto = require('crypto');
 const prisma = require('../lib/prisma');
 const { validateSignupInput } = require('../lib/validators');
+const { track } = require('../lib/analytics');
 
 const SALT_ROUNDS = 12;
 const REFRESH_TOKEN_DAYS = 30;
@@ -80,6 +81,7 @@ async function signup(req, res) {
         emailPublic: false, // 이메일은 기본 비공개 (DB 기본값과 같지만, 마이그레이션 적용 전에도 확실히 비공개로)
       },
     });
+    track(user.id, 'signup', { method: 'email' });
 
     const token = signAccessToken(user.id);
     const refreshToken = await createRefreshToken(user.id);
@@ -233,6 +235,7 @@ async function findOrCreateSocialUser({ provider, providerId, email, emailVerifi
         [idField]: providerId,
       },
     });
+    track(user.id, 'signup', { method: provider });
   }
 
   const token = signAccessToken(user.id);

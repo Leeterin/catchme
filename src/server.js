@@ -151,6 +151,15 @@ app.get('/api/feed-photos/:postId/:idx', (req, res, next) => require('./controll
 app.get('/api/chat-images/:messageId', (req, res, next) => require('./controllers/chats.controller').getChatImage(req, res).catch(next));
 app.use('/api/admin', adminRoutes);
 app.use('/api/invites', invitesRoutes);
+app.use('/api/engagement', require('./routes/engagement.routes'));
+
+// 정기 알림(아침 오늘 일정 / 일요일 다음 주 시간) - 서버 안에서 5분마다 돌지만, Render가 잠들어 있으면 못 도니까
+// 바깥 크론(GitHub Actions 등)이 10분마다 이 주소를 불러서 깨우고 돌릴 수 있게 함. CRON_SECRET이 없으면 이 주소는 꺼져 있음
+app.post('/api/cron/tick', (req, res, next) => {
+  const secret = process.env.CRON_SECRET;
+  if (!secret || req.get('x-cron-secret') !== secret) return res.status(404).json({ message: 'Not found' });
+  require('./lib/engagement').runEngagementTick().then((r) => res.json(r)).catch(next);
+});
 
 // 별도 관리자 페이지 - 일반 유저 앱(catchme-F 저장소)과는 완전히 분리된 정적 페이지.
 // 이 페이지를 열 수 있다는 것 자체는 누구나 가능하지만, 안의 모든 API 호출은 /api/admin/*
@@ -163,4 +172,5 @@ app.use(errorHandler);
 const PORT = process.env.PORT || 4000;
 httpServer.listen(PORT, () => {
   console.log(`CATCHME API server listening on http://localhost:${PORT}`);
+  require('./lib/engagement').startEngagementScheduler();
 });

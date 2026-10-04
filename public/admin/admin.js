@@ -217,6 +217,7 @@
   const TAB_LOADERS = {
     dashboard: loadDashboard,
     users: () => loadUsers(1),
+    metrics: () => loadMetrics(),
     reports: () => loadReports(1),
     feed: () => loadFeed(1),
     meetups: () => loadMeetups(1),
@@ -285,6 +286,62 @@
       grid.innerHTML = `<div class="empty-state">통계를 불러오지 못했어요: ${escapeHtml(err.message)}</div>`;
     }
   }
+
+  // ---------- 지표 (활성화 / 재방문) ----------
+  function initMetricsDateInputs(){
+    const s = document.getElementById('metricsStartInput');
+    const e = document.getElementById('metricsEndInput');
+    if(s.value && e.value) return;
+    const end = new Date();
+    e.value = end.toISOString().slice(0, 10);
+    s.value = new Date(end.getTime() - 29 * 86400e3).toISOString().slice(0, 10);
+  }
+  const pct = (n, of) => (of > 0 ? Math.round(n / of * 100) : 0);
+  async function loadMetrics(){
+    initMetricsDateInputs();
+    const funnel = document.getElementById('metricsFunnel');
+    funnel.innerHTML = '<div class="empty-state">불러오는 중...</div>';
+    const start = document.getElementById('metricsStartInput').value;
+    const end = document.getElementById('metricsEndInput').value;
+    try {
+      const data = await apiRequest(`/admin/metrics?start=${start}&end=${end}`);
+      const c = data.cohort;
+      document.getElementById('metricsNotice').innerHTML = data.trackingReady ? ''
+        : '<div class="metrics-notice">재방문·캘린더 불러오기 기록 테이블이 아직 DB에 없어요. 마이그레이션(14_add_engagement_analytics)을 적용하면 그때부터 쌓여요.</div>';
+      const steps = [
+        ['가입', c.signups],
+        ['첫날 일정 추가', c.firstEvent1d],
+        ['7일 안에 캘린더 불러오기', c.import7d],
+        ['7일 안에 예약 가능 시간 열기', c.available7d],
+        ['7일 안에 약속 링크 만들기', c.invite7d],
+        ['7일 안에 친구 맺기', c.friend7d],
+      ];
+      funnel.innerHTML = steps.map(([label, n]) => {
+        if(n === null) return `<div class="metric-row"><span>${label}</span><div class="bar"></div><span class="num">기록 없음</span></div>`;
+        const p = pct(n, c.signups);
+        return `<div class="metric-row"><span>${label}</span><div class="bar"><span style="width:${p}%"></span></div><span class="num"><b>${p}%</b> · ${n}명</span></div>`;
+      }).join('');
+      const ret = [
+        ['다음 날 다시 옴 (D1)', c.d1],
+        ['7일째 다시 옴 (D7)', c.d7],
+        ['7일 안에 한 번이라도 다시 옴', c.w1],
+      ];
+      document.getElementById('metricsRetention').innerHTML = ret.map(([label, r]) => `
+        <div class="stat-card">
+          <div class="label">${label}</div>
+          <div class="value">${r ? pct(r.n, r.of) + '%' : '-'}</div>
+          <div class="sub">${r ? `${r.of}명 중 ${r.n}명` : '기록 테이블 필요'}</div>
+        </div>`).join('');
+      document.getElementById('metricsDaily').innerHTML = `
+        <table class="metric-table">
+          <tr><th>날짜</th><th>가입</th><th>활성 사용자</th><th>새 일정</th><th>약속 링크</th><th>링크 응답</th></tr>
+          ${data.daily.slice().reverse().map((d) => `<tr><td>${d.day}</td><td>${d.signups}</td><td>${d.active === null ? '-' : d.active}</td><td>${d.events}</td><td>${d.invites}</td><td>${d.responses}</td></tr>`).join('')}
+        </table>`;
+    } catch(err) {
+      funnel.innerHTML = `<div class="empty-state">지표를 불러오지 못했어요: ${escapeHtml(err.message)}</div>`;
+    }
+  }
+  document.getElementById('metricsRefreshBtn').addEventListener('click', loadMetrics);
 
   // ---------- 대시보드 그래프 (일별 추이) ----------
   // 날짜 입력칸은 처음 한 번만 기본값(최근 30일)을 채워넣고, 그 다음부턴 사용자가 고른 기간을 유지함

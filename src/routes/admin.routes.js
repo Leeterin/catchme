@@ -18,6 +18,7 @@ const router = express.Router();
 router.use(requireAuth, requireAdmin);
 
 router.get('/overview', getOverview);
+router.get('/metrics', (req, res, next) => require('../controllers/metrics.controller').getMetrics(req, res).catch(next)); // 활성화·재방문 지표
 router.get('/stats/daily', getDailyStats);
 
 router.get('/users', listUsers);
