@@ -52,7 +52,7 @@ model User {
 
   // 공개/비공개 설정 - 친구에게 보일지 여부
   phonePublic Boolean @default(false)
-  emailPublic Boolean @default(true)
+  emailPublic Boolean @default(false) // 새로 가입하면 이메일은 기본 비공개 (전화번호와 같게)
 
   // 관리자 제재 - 정지되면 로그인 자체가 막힘 (관리자 페이지에서만 설정/해제 가능)
   isSuspended     Boolean   @default(false)

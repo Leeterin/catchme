@@ -712,10 +712,10 @@ async function sendReservationRequest(req, res) {
   }
 
   // 내 캘린더에 만들 "예약중..." 홀드 제목에 상대방 이름을 넣기 위해 조회 (1:1 방 기준 - 그룹이면 그냥 "예약중..."으로 둠)
-  let holdTitle = '예약중...';
+  let holdTitle = '약속 요청중...';
   if (otherMemberIds.length === 1) {
     const receiver = await prisma.user.findUnique({ where: { id: otherMemberIds[0] }, select: { name: true } });
-    if (receiver && receiver.name) holdTitle = `${receiver.name}님에게 예약 요청중`;
+    if (receiver && receiver.name) holdTitle = `${receiver.name}님에게 약속 요청중`;
   }
 
   const message = await prisma.$transaction(async (tx) => {
@@ -773,7 +773,7 @@ async function respondToReservation(req, res, status) {
     include: { chatRoom: { include: { members: { include: { user: { select: { name: true } } } } } } },
   });
   if (!message || message.type !== 'RESERVATION') {
-    return res.status(404).json({ message: '예약 요청을 찾을 수 없어요.' });
+    return res.status(404).json({ message: '약속 요청을 찾을 수 없어요.' });
   }
 
   const isMember = message.chatRoom.members.some((m) => m.userId === req.userId);
@@ -882,7 +882,7 @@ async function withdrawReservation(req, res) {
   const { messageId } = req.params;
   const message = await prisma.message.findUnique({ where: { id: messageId } });
   if (!message || message.type !== 'RESERVATION') {
-    return res.status(404).json({ message: '예약 요청을 찾을 수 없어요.' });
+    return res.status(404).json({ message: '약속 요청을 찾을 수 없어요.' });
   }
   if (message.senderId !== req.userId) {
     return res.status(403).json({ message: '본인이 보낸 요청만 취소할 수 있어요.' });
@@ -923,12 +923,12 @@ async function cancelReservationMessage(req, res) {
   const { restoreAvailability } = req.body || {};
   const message = await prisma.message.findUnique({ where: { id: messageId }, include: { chatRoom: { include: { members: true } } } });
   if (!message || message.type !== 'RESERVATION') {
-    return res.status(404).json({ message: '예약을 찾을 수 없어요.' });
+    return res.status(404).json({ message: '약속을 찾을 수 없어요.' });
   }
   const isMember = message.chatRoom.members.some((m) => m.userId === req.userId);
   if (!isMember) return res.status(403).json({ message: '이 채팅방에 접근할 권한이 없어요.' });
   if (message.reservationStatus !== 'CONFIRMED') {
-    return res.status(409).json({ message: '확정된 예약만 취소할 수 있어요.' });
+    return res.status(409).json({ message: '확정된 약속만 취소할 수 있어요.' });
   }
 
   let updated;
@@ -997,12 +997,12 @@ async function restoreAvailabilityChoice(req, res) {
   const { restore } = req.body || {};
   const message = await prisma.message.findUnique({ where: { id: messageId }, include: { chatRoom: { include: { members: true } } } });
   if (!message || message.type !== 'RESERVATION') {
-    return res.status(404).json({ message: '예약을 찾을 수 없어요.' });
+    return res.status(404).json({ message: '약속을 찾을 수 없어요.' });
   }
   const isMember = message.chatRoom.members.some((m) => m.userId === req.userId);
   if (!isMember) return res.status(403).json({ message: '이 채팅방에 접근할 권한이 없어요.' });
   if (message.reservationStatus !== 'CANCELLED') {
-    return res.status(409).json({ message: '취소된 예약만 되돌릴 수 있어요.' });
+    return res.status(409).json({ message: '취소된 약속만 되돌릴 수 있어요.' });
   }
   if (!restore) {
     // "아니오/그대로 두기" - 아무것도 안 바꿈 (버튼을 눌렀다는 것만 응답해주면 됨)

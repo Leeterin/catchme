@@ -323,7 +323,7 @@ async function createInvite(req, res) {
       if (cells.length === 0) {
         return res.status(400).json({
           message: audience === 'work'
-            ? '고른 날짜에 일용으로 열어둔 시간이 없어요. 캘린더에서 "모두"나 "일만"으로 먼저 열어주세요.'
+            ? '고른 날짜에 업무용으로 열어둔 시간이 없어요. 캘린더에서 "모두"나 "업무용"으로 먼저 열어주세요.'
             : '고른 날짜에 예약 가능한 시간이 없어요. 캘린더에서 먼저 등록해주세요.',
         });
       }

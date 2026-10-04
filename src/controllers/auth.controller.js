@@ -77,6 +77,7 @@ async function signup(req, res) {
         name: name.trim(),
         passwordHash,
         phone: phone || null,
+        emailPublic: false, // 이메일은 기본 비공개 (DB 기본값과 같지만, 마이그레이션 적용 전에도 확실히 비공개로)
       },
     });
 
@@ -228,6 +229,7 @@ async function findOrCreateSocialUser({ provider, providerId, email, emailVerifi
         username,
         name: name || (provider === 'kakao' ? '카카오 사용자' : '네이버 사용자'),
         passwordHash: null,
+        emailPublic: false, // 이메일은 기본 비공개
         [idField]: providerId,
       },
     });
