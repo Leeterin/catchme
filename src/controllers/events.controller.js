@@ -585,6 +585,7 @@ async function getFriendMonthSchedule(req, res) {
         if (ev.recurringWeekdays.length === 0) return ev;
         if (!ev.recurringWeekdays.includes(dow)) return null;
         if (ev.recurringExceptions.includes(dateKey)) return null;
+        if (ev.recurringUntil && kstDate(dateKey, 0, 0) > new Date(ev.recurringUntil)) return null; // 반복이 끝난 날은 빼기
         return {
           ...ev,
           startTime: kstDate(dateKey, ev.startTime.getHours(), ev.startTime.getMinutes()),

@@ -4,6 +4,7 @@ const { isAllowedImageDataUrl } = require('../lib/validators');
 const { computeRecommendation } = require('../lib/locationRecommend');
 const { pushInBackground } = require('../lib/push');
 const { safeFindOrCreatePlace, recordPlaceEvent } = require('../lib/places');
+const { isRangeBookableFor, hasConfirmedAppointmentOverlap } = require('../lib/bookable');
 
 const MEMBER_USER_SELECT = {
   id: true,
@@ -662,6 +663,9 @@ async function sendReservationRequest(req, res) {
   if (isNaN(startDate) || isNaN(endDate) || endDate <= startDate) {
     return res.status(400).json({ message: '시간 범위가 올바르지 않아요.' });
   }
+  if (startDate.getTime() < Date.now() - 60 * 1000) {
+    return res.status(400).json({ message: '이미 지난 시간에는 약속을 요청할 수 없어요.' });
+  }
   const canMessage = await assertCanMessage(roomId, req.userId);
   if (!canMessage.ok) {
     return res.status(canMessage.statusCode).json({ message: canMessage.message });
@@ -669,6 +673,11 @@ async function sendReservationRequest(req, res) {
 
   // 이 방의 상대방(받는 사람)을 찾아서, 그 사람이 이미 같은 시간에 다른 사람의 요청을 받아둔 상태인지 확인 (더블부킹 방지)
   const otherMemberIds = await getOtherMemberIds(roomId, req.userId);
+
+  // 1:1 요청은 상대가 열어둔 "예약 가능 시간" 안에서만 받음 - 화면이 오래돼서 이미 약속이 잡힌 시간에 요청이 들어오는 것도 여기서 막힘
+  if (otherMemberIds.length === 1 && !(await isRangeBookableFor(otherMemberIds[0], req.userId, startDate, endDate))) {
+    return res.status(409).json({ message: '그 사이 상대방의 예약 가능 시간이 바뀌었어요. 캘린더를 다시 확인해주세요.' });
+  }
   for (const receiverId of otherMemberIds) {
     if (await hasConflictingPendingRequest(receiverId, startDate, endDate)) {
       return res.status(409).json({ message: '이미 다른 사람이 같은 시간에 요청을 보내둔 상태예요. 잠시 후 다시 시도해주세요.' });
@@ -721,7 +730,7 @@ async function sendReservationRequest(req, res) {
   });
 
   await notifyRoom(roomId, req.userId, 'newMessage', { roomId, message: serializeMessage(message) });
-  pushToRoom(roomId, req.userId, '약속 요청을 보냈어요');
+  pushToRoom(roomId, req.userId, `${formatDateLabel(startDate)} ${formatTimeLabel(startDate, endDate)} 약속 요청을 보냈어요`);
 
   return res.status(201).json({ message: serializeMessage(message) });
 }
@@ -747,6 +756,15 @@ async function respondToReservation(req, res, status) {
   }
   if (message.reservationStatus !== 'PENDING') {
     return res.status(409).json({ message: '이미 처리된 요청이에요.' });
+  }
+  if (status === 'CONFIRMED') {
+    if (message.reservationStart.getTime() < Date.now()) {
+      return res.status(409).json({ message: '약속 시간이 이미 지나서 수락할 수 없어요.' });
+    }
+    const memberIds = message.chatRoom.members.map((m) => m.userId);
+    if (await hasConfirmedAppointmentOverlap(memberIds, message.reservationStart, message.reservationEnd, message.id)) {
+      return res.status(409).json({ message: '이 시간에 이미 확정된 다른 약속이 있어요.' });
+    }
   }
 
   let updated;
@@ -822,8 +840,11 @@ async function respondToReservation(req, res, status) {
   }
 
   await notifyRoom(message.chatRoomId, req.userId, 'newMessage', { roomId: message.chatRoomId, message: serializeMessage(updated) });
+  const whenLabel = `${formatDateLabel(message.reservationStart)} ${formatTimeLabel(message.reservationStart, message.reservationEnd)}`;
   if (status === 'CONFIRMED' && updated?.reservationStatus === 'CONFIRMED') {
-    pushToRoom(message.chatRoomId, req.userId, '약속이 확정됐어요!');
+    pushToRoom(message.chatRoomId, req.userId, `약속이 확정됐어요! ${whenLabel}`);
+  } else if (status === 'DECLINED') {
+    pushToRoom(message.chatRoomId, req.userId, `${whenLabel} 약속 요청을 거절했어요`);
   }
 
   return res.json({ message: serializeMessage(updated) });
@@ -863,6 +884,7 @@ async function withdrawReservation(req, res) {
     throw err;
   }
   await notifyRoom(message.chatRoomId, req.userId, 'newMessage', { roomId: message.chatRoomId, message: serializeMessage(updated) });
+  pushToRoom(message.chatRoomId, req.userId, `${formatDateLabel(message.reservationStart)} ${formatTimeLabel(message.reservationStart, message.reservationEnd)} 약속 요청을 취소했어요`);
   return res.json({ message: serializeMessage(updated) });
 }
 
@@ -882,8 +904,18 @@ async function cancelReservationMessage(req, res) {
     return res.status(409).json({ message: '확정된 예약만 취소할 수 있어요.' });
   }
 
-  const updated = await prisma.$transaction(async (tx) => {
-    const result = await tx.message.update({ where: { id: messageId }, data: { reservationStatus: 'CANCELLED' } });
+  let updated;
+  try {
+  updated = await prisma.$transaction(async (tx) => {
+    // 둘이 거의 동시에 취소를 눌러도 한 번만 처리되게 (안 그러면 "예약 가능" 복원이 두 번 일어남)
+    const { count } = await tx.message.updateMany({
+      where: { id: messageId, reservationStatus: 'CONFIRMED' },
+      data: { reservationStatus: 'CANCELLED' },
+    });
+    if (count === 0) {
+      throw Object.assign(new Error('이미 취소된 약속이에요.'), { statusCode: 409 });
+    }
+    const result = await tx.message.findUnique({ where: { id: messageId } });
     // 이 예약 자체의 핀뿐 아니라, 같은 방에 날짜 없이 "장소만" 임시로 잡아둔 핀("여기 어때요?" 제안 등으로
     // 따로 생긴 핀)도 이 약속의 장소였을 테니 같이 지움. 안 그러면 약속은 지워졌는데 장소 카드만 채팅방에
     // 유령처럼 남음.
@@ -919,8 +951,13 @@ async function cancelReservationMessage(req, res) {
     }
     return result;
   });
+  } catch (err) {
+    if (err.statusCode) return res.status(err.statusCode).json({ message: err.message });
+    throw err;
+  }
 
   await notifyRoom(message.chatRoomId, req.userId, 'newMessage', { roomId: message.chatRoomId, message: serializeMessage(updated) });
+  pushToRoom(message.chatRoomId, req.userId, `${formatDateLabel(message.reservationStart)} ${formatTimeLabel(message.reservationStart, message.reservationEnd)} 약속을 취소했어요`);
   return res.json({ message: serializeMessage(updated) });
 }
 
