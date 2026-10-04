@@ -6,6 +6,9 @@ const { pushInBackground } = require('../lib/push');
 const { safeFindOrCreatePlace, recordPlaceEvent } = require('../lib/places');
 const { isRangeBookableFor, hasConfirmedAppointmentOverlap } = require('../lib/bookable');
 
+const MAX_PROPOSAL_OPTIONS = 30;
+const MAX_TEXT_LENGTH = 2000;
+
 const MEMBER_USER_SELECT = {
   id: true,
   username: true,
@@ -586,7 +589,8 @@ async function sendTextMessage(req, res) {
   const { roomId } = req.params;
   const { text, replyToMessageId, replyToPreview } = req.body;
 
-  if (!text || !text.trim()) return res.status(400).json({ message: '메시지 내용을 입력해주세요.' });
+  if (typeof text !== 'string' || !text.trim()) return res.status(400).json({ message: '메시지 내용을 입력해주세요.' });
+  if (text.length > MAX_TEXT_LENGTH) return res.status(400).json({ message: `메시지는 ${MAX_TEXT_LENGTH}자까지 보낼 수 있어요.` });
   const canMessage = await assertCanMessage(roomId, req.userId);
   if (!canMessage.ok) {
     return res.status(canMessage.statusCode).json({ message: canMessage.message });
@@ -599,12 +603,12 @@ async function sendTextMessage(req, res) {
       type: 'TEXT',
       text: text.trim(),
       replyToMessageId: replyToMessageId || null,
-      replyToPreview: replyToMessageId ? (replyToPreview || null) : null,
+      replyToPreview: replyToMessageId && typeof replyToPreview === 'string' ? replyToPreview.slice(0, 200) : null,
     },
   });
 
   await notifyRoom(roomId, req.userId, 'newMessage', { roomId, message: serializeMessage(message) });
-  pushToRoom(roomId, req.userId, message.text);
+  pushToRoom(roomId, req.userId, message.text.length > 100 ? `${message.text.slice(0, 100)}…` : message.text);
 
   return res.status(201).json({ message: serializeMessage(message) });
 }
@@ -1376,7 +1380,7 @@ async function cancelLocationSuggestMessage(req, res) {
 async function maybeConfirmProposal(message, roomId, actorId) {
   if (message.proposalStatus !== 'VOTING') return null;
   const room = await prisma.chatRoom.findUnique({ where: { id: roomId } });
-  const members = await prisma.chatRoomMember.findMany({ where: { chatRoomId: roomId } });
+  const members = await prisma.chatRoomMember.findMany({ where: { chatRoomId: roomId }, include: { user: { select: { name: true } } } });
   const totalMembers = members.length;
 
   // 1:1 방(그룹 아님)에서 후보가 여러 개면, 제안한 사람은 이미 "이 중 아무거나 괜찮다"는 뜻이라 상대가 하나만 골라도 바로 확정함
@@ -1388,6 +1392,16 @@ async function maybeConfirmProposal(message, roomId, actorId) {
   if (!winner) return null;
 
   const memberIds = members.map((m) => m.userId);
+  // 지난 시간이거나, 그 사이 누군가 같은 시간에 다른 약속을 확정했으면 확정하지 않고 투표 상태로 둠 (더블부킹 방지)
+  if (winner.startTime.getTime() < Date.now()) return null;
+  if (await hasConfirmedAppointmentOverlap(memberIds, winner.startTime, winner.endTime, message.id)) return null;
+
+  // 캘린더 제목: 1:1이면 "민지와 약속", 모임이면 "모임이름 약속" (1:1 예약 확정과 같은 방식)
+  const titleFor = (m) => {
+    if (room && room.isGroup) return room.name ? `${room.name} 약속` : '약속';
+    const other = members.find((x) => x.userId !== m.userId);
+    return other && other.user && other.user.name ? `${withWaGwa(other.user.name)} 약속` : '약속';
+  };
 
   let confirmedNow = false;
   const result = await prisma.$transaction(async (tx) => {
@@ -1408,7 +1422,7 @@ async function maybeConfirmProposal(message, roomId, actorId) {
         userId: m.userId,
         startTime: winner.startTime,
         endTime: winner.endTime,
-        title: '약속',
+        title: titleFor(m),
         status: 'BUSY',
         // 확정된 약속은 기본적으로 "나만보기"로 등록되고, 이후 캘린더에서 직접 바꿀 수 있음
         visibleGroupIds: [],
@@ -1444,6 +1458,9 @@ async function sendTimeProposal(req, res) {
   if (!Array.isArray(options) || options.length === 0) {
     return res.status(400).json({ message: '시간 후보를 하나 이상 선택해주세요.' });
   }
+  if (options.length > MAX_PROPOSAL_OPTIONS) {
+    return res.status(400).json({ message: `시간 후보는 한 번에 ${MAX_PROPOSAL_OPTIONS}개까지 보낼 수 있어요.` });
+  }
   const canMessage = await assertCanMessage(roomId, req.userId);
   if (!canMessage.ok) {
     return res.status(canMessage.statusCode).json({ message: canMessage.message });
@@ -1453,8 +1470,11 @@ async function sendTimeProposal(req, res) {
   for (const o of options) {
     const start = new Date(o.start);
     const end = new Date(o.end);
-    if (isNaN(start) || isNaN(end) || end <= start) {
+    if (!o || isNaN(start) || isNaN(end) || end <= start) {
       return res.status(400).json({ message: '시간 후보 형식이 올바르지 않아요.' });
+    }
+    if (start.getTime() < Date.now() - 60 * 1000) {
+      return res.status(400).json({ message: '이미 지난 시간은 후보로 보낼 수 없어요.' });
     }
     parsedOptions.push({ start, end });
   }
@@ -1501,6 +1521,12 @@ async function voteTimeProposal(req, res) {
   }
   const option = message.proposalOptions.find((o) => o.id === optionId);
   if (!option) return res.status(404).json({ message: '해당 시간 후보를 찾을 수 없어요.' });
+  if (option.startTime.getTime() < Date.now()) {
+    return res.status(409).json({ message: '이미 지난 시간이라 고를 수 없어요.' });
+  }
+  if (await hasConfirmedAppointmentOverlap([req.userId], option.startTime, option.endTime, message.id)) {
+    return res.status(409).json({ message: '이 시간에 이미 확정된 다른 약속이 있어요.' });
+  }
 
   // 한 사람은 한 후보에만 투표할 수 있음 - 다른 후보에 투표한 게 있으면 지우고 새로 투표
   await prisma.timeProposalVote.deleteMany({ where: { userId: req.userId, option: { messageId } } });
