@@ -105,6 +105,15 @@ app.use('/api', rateLimit({
 }));
 
 app.get('/health', (req, res) => res.json({ ok: true }));
+// 임시: Render 프록시 구조 확인용 (확인 후 삭제)
+app.get('/health/ip-debug', (req, res) => res.json({
+  ip: req.ip,
+  remote: req.socket.remoteAddress,
+  xff: req.headers['x-forwarded-for'] || null,
+  trueClientIp: req.headers['true-client-ip'] || null,
+  cfConnectingIp: req.headers['cf-connecting-ip'] || null,
+  xRealIp: req.headers['x-real-ip'] || null,
+}));
 
 app.use('/api/auth', authRoutes);
 app.use('/api/friends', friendsRoutes);
