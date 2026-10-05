@@ -105,6 +105,7 @@ async function availableCellsFor(userId, dates, startHour = 0, endHour = 24, aud
     where: {
       userId,
       status: { in: ['BUSY', 'AVAILABLE'] },
+      NOT: { status: 'BUSY', blocksBooking: false }, // "이 시간에도 예약 받기" 켠 바쁨 일정은 예약을 막지 않음
       OR: [
         { recurringWeekdays: { isEmpty: true }, startTime: { lt: rangeEnd }, endTime: { gt: rangeStart } },
         {

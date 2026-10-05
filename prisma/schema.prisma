@@ -443,6 +443,10 @@ model Event {
   visiblePrivate  Boolean  @default(false)
   visibleGroupIds String[] @default([])
 
+  // 바쁨 일정이 예약을 막는지 - false면 내 캘린더엔 그대로 있지만 이 시간에도 예약 가능 시간을 열 수 있고,
+  // 친구/초대 링크 쪽에선 이 일정이 없는 것처럼 취급함 ("이 시간에도 예약 받기")
+  blocksBooking Boolean @default(true)
+
   // 예약 요청을 보냈지만 아직 상대가 수락/거절하지 않은 "예약중..." 상태 표시용
   // (상대가 응답하면 이 일정은 지워지고, 확정이면 정식 약속 일정이 새로 생김)
   isPendingHold     Boolean @default(false)

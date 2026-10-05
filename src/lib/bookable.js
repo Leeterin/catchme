@@ -50,6 +50,7 @@ async function isRangeBookableFor(ownerId, viewerId, start, end) {
     prisma.event.findMany({
       where: {
         userId: ownerId,
+        NOT: { status: 'BUSY', blocksBooking: false }, // "이 시간에도 예약 받기" 켠 바쁨 일정은 예약을 막지 않음
         OR: [
           { recurringWeekdays: { isEmpty: true }, startTime: { lt: rangeEnd }, endTime: { gt: rangeStart } },
           {
@@ -92,6 +93,7 @@ async function hasConfirmedAppointmentOverlap(userIds, start, end, excludeMessag
     where: {
       userId: { in: userIds },
       status: 'BUSY',
+      blocksBooking: true,
       isPendingHold: false,
       sourceMessageId: { not: null, ...(excludeMessageId ? { notIn: [excludeMessageId] } : {}) },
       startTime: { lt: end },

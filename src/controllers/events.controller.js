@@ -87,6 +87,7 @@ async function matchCalendar(req, res) {
     where: {
       userId: { in: allUserIds },
       status: { in: ['BUSY', 'AVAILABLE'] },
+      NOT: { status: 'BUSY', blocksBooking: false }, // "이 시간에도 예약 받기" 켠 바쁨 일정은 매칭을 막지 않음
       OR: [
         { recurringWeekdays: { isEmpty: true }, startTime: { lt: queryRangeEnd }, endTime: { gt: startDate } },
         {
@@ -211,6 +212,7 @@ function serializeEvent(event) {
     status: event.status,
     eventType: event.eventType,
     availableFor: event.availableFor || 'all',
+    blocksBooking: event.blocksBooking !== false,
     isPendingHold: event.isPendingHold,
     // 확정된 예약(약속)이라 채팅에서만 취소할 수 있는 일정인지 - 홀드가 아니면서 채팅방에 연결돼 있으면 그런 경우임
     isReservationLinked: !event.isPendingHold && !!event.sourceChatRoomId,
@@ -331,7 +333,7 @@ function sanitizeAvailableFor(v) {
 
 // POST /api/events   body: { title, startTime, endTime, status?, eventType?, visibility?:{groupIds,private}, recurringWeekdays?, recurringUntil?, color? }
 async function createEvent(req, res) {
-  const { title, startTime, endTime, status, eventType, visibility, sourceChatRoomId, recurringWeekdays, recurringUntil, color, availableFor } = req.body;
+  const { title, startTime, endTime, status, eventType, visibility, sourceChatRoomId, recurringWeekdays, recurringUntil, color, availableFor, blocksBooking } = req.body;
   const { valid, errors } = validateEventInput({ title, startTime, endTime, status });
   if (!valid) return res.status(400).json({ message: '입력값을 확인해주세요.', errors });
 
@@ -351,6 +353,7 @@ async function createEvent(req, res) {
       status: status || 'BUSY',
       eventType: eventType === 'available' ? 'available' : 'busy',
       availableFor: sanitizeAvailableFor(availableFor) || 'all',
+      blocksBooking: blocksBooking !== false,
       visiblePrivate: isPrivate,
       visibleGroupIds: groupIds,
       sourceChatRoomId: typeof sourceChatRoomId === 'string' ? sourceChatRoomId : null,
@@ -371,7 +374,7 @@ async function updateEvent(req, res) {
     return res.status(404).json({ message: '일정을 찾을 수 없어요.' });
   }
 
-  const { title, startTime, endTime, status, eventType, visibility, recurringWeekdays, recurringUntil, recurringExceptions, color, availableFor } = req.body;
+  const { title, startTime, endTime, status, eventType, visibility, recurringWeekdays, recurringUntil, recurringExceptions, color, availableFor, blocksBooking } = req.body;
   const { valid, errors } = validateEventInput({ title, startTime, endTime, status }, { partial: true });
   if (!valid) return res.status(400).json({ message: '입력값을 확인해주세요.', errors });
 
@@ -405,6 +408,7 @@ async function updateEvent(req, res) {
       status: status !== undefined ? status : undefined,
       eventType: eventType !== undefined ? (eventType === 'available' ? 'available' : 'busy') : undefined,
       availableFor: sanitizeAvailableFor(availableFor),
+      blocksBooking: typeof blocksBooking === 'boolean' ? blocksBooking : undefined,
       visiblePrivate: visiblePrivateUpdate,
       visibleGroupIds: visibleGroupIdsUpdate,
       recurringWeekdays: weekdays,
@@ -466,6 +470,7 @@ async function getFriendDaySchedule(req, res) {
   const rawEventsFetched = await prisma.event.findMany({
     where: {
       userId: friend.id,
+      NOT: { status: 'BUSY', blocksBooking: false }, // "이 시간에도 예약 받기" 켠 바쁨 일정은 친구에겐 없는 것처럼
       OR: [
         { recurringWeekdays: { isEmpty: true }, startTime: { lt: dayEnd }, endTime: { gt: dayStart } },
         {
@@ -577,6 +582,7 @@ async function getFriendMonthSchedule(req, res) {
   const rawEventsFetched = await prisma.event.findMany({
     where: {
       userId: friend.id,
+      NOT: { status: 'BUSY', blocksBooking: false }, // "이 시간에도 예약 받기" 켠 바쁨 일정은 친구에겐 없는 것처럼
       OR: [
         { recurringWeekdays: { isEmpty: true }, startTime: { lt: rangeEnd }, endTime: { gt: rangeStart } },
         {

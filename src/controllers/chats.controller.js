@@ -231,7 +231,7 @@ async function restoreAvailabilityInRange(userId, start, end, client, options) {
   // 이 범위와 겹치는, 아직 남아있는 다른 바쁨 일정들을 찾음 (지금 취소되는 이 예약 자신의 홀드는
   // 이 함수가 불리기 전에 이미 삭제된 상태이므로 여기엔 안 걸림)
   const busyOverlaps = await db.event.findMany({
-    where: { userId, status: 'BUSY', startTime: { lt: end }, endTime: { gt: start } },
+    where: { userId, status: 'BUSY', blocksBooking: true, startTime: { lt: end }, endTime: { gt: start } },
     orderBy: { startTime: 'asc' },
   });
 
