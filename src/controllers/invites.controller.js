@@ -86,9 +86,14 @@ function kstMinuteOfDay(d) {
 }
 
 // 링크 용도: 친구용은 "모두 + 친구만", 일용은 "모두 + 일만" 열어둔 시간을 씀
+// 그룹용("group:<그룹 id>")은 친구에게 연 시간 중 모든 친구 또는 그 그룹에 연 시간만 씀
 const AUDIENCES = ['friends', 'work'];
 function parseAudience(v) {
+  if (typeof v === 'string' && /^group:[0-9a-zA-Z-]{1,64}$/.test(v)) return v;
   return AUDIENCES.includes(v) ? v : 'friends';
+}
+function audienceGroupId(audience) {
+  return typeof audience === 'string' && audience.startsWith('group:') ? audience.slice(6) : null;
 }
 
 // 이 사람 캘린더에서 "예약 가능"으로 등록된 1시간 칸들 ("YYYY-MM-DD|HH" Set)
@@ -115,9 +120,12 @@ async function availableCellsFor(userId, dates, startHour = 0, endHour = 24, aud
         },
       ],
     },
-    select: { startTime: true, endTime: true, status: true, availableFor: true, recurringWeekdays: true, recurringUntil: true, recurringExceptions: true },
+    select: { startTime: true, endTime: true, status: true, availableFor: true, visiblePrivate: true, visibleGroupIds: true, recurringWeekdays: true, recurringUntil: true, recurringExceptions: true },
   });
-  const forThisLink = (ev) => ev.availableFor === 'all' || ev.availableFor === audience;
+  const groupId = audienceGroupId(audience);
+  const forThisLink = groupId
+    ? (ev) => ev.availableFor !== 'work' && !ev.visiblePrivate && (ev.visibleGroupIds.length === 0 || ev.visibleGroupIds.includes(groupId))
+    : (ev) => ev.availableFor === 'all' || ev.availableFor === audience;
 
   const now = Date.now();
   sorted.forEach((date) => {
@@ -288,7 +296,7 @@ async function addConfirmedEvent(db, poll, userId) {
   });
 }
 
-// GET /api/invites/availability?audience=friends|work - 링크 만들기 화면 미리보기용, 오늘부터 3주 동안 내 예약 가능 칸
+// GET /api/invites/availability?audience=friends|work|group:<id> - 링크 만들기 화면 미리보기용, 오늘부터 3주 동안 내 예약 가능 칸
 async function myAvailability(req, res) {
   try {
     const today = todayKstStr();
@@ -307,7 +315,7 @@ async function myAvailability(req, res) {
   }
 }
 
-// POST /api/invites  { title, dates: ["YYYY-MM-DD"], startHour, endHour, fromCalendar, audience?, place? }
+// POST /api/invites  { title, dates: ["YYYY-MM-DD"], startHour, endHour, fromCalendar, audience?(friends|work|group:<id>), place? }
 // fromCalendar면 startHour/endHour는 무시하고, 고른 날짜들의 내 예약 가능 시간으로 범위를 정함
 async function createInvite(req, res) {
   try {
@@ -326,7 +334,9 @@ async function createInvite(req, res) {
         return res.status(400).json({
           message: audience === 'work'
             ? '고른 날짜에 업무용으로 열어둔 시간이 없어요. 캘린더에서 "모두"나 "업무용"으로 먼저 열어주세요.'
-            : '고른 날짜에 예약 가능한 시간이 없어요. 캘린더에서 먼저 등록해주세요.',
+            : audienceGroupId(audience)
+              ? '고른 날짜에 이 그룹에 열어둔 시간이 없어요. 캘린더에서 이 그룹이나 모든 친구에게 먼저 열어주세요.'
+              : '고른 날짜에 예약 가능한 시간이 없어요. 캘린더에서 먼저 등록해주세요.',
         });
       }
       const hours = cells.map((c) => Number(c.split('|')[1]));
