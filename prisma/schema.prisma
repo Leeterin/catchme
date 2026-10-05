@@ -69,6 +69,7 @@ model User {
   meetupJoins    MeetupParticipant[]
   feedPosts      FeedPost[]
   feedPostLikes    FeedPostLike[]
+  feedPostSaves    FeedPostSave[]
   feedPostComments FeedPostComment[]
   reportsMade      Report[]
   meetupReviews    MeetupReview[]
@@ -631,6 +632,7 @@ model FeedPost {
   createdAt DateTime @default(now())
 
   likes    FeedPostLike[]
+  saves    FeedPostSave[]
   comments FeedPostComment[]
 
   @@map("feed_posts")
@@ -647,6 +649,20 @@ model FeedPostLike {
 
   @@unique([postId, userId])
   @@map("feed_post_likes")
+}
+
+// 리뷰 저장(⭐ 나중에 가볼 곳) - 한 사람이 한 리뷰를 한 번만 저장, 다시 누르면 저장 취소
+model FeedPostSave {
+  id        String   @id @default(uuid())
+  postId    String
+  post      FeedPost @relation(fields: [postId], references: [id], onDelete: Cascade)
+  userId    String
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  createdAt DateTime @default(now())
+
+  @@unique([postId, userId])
+  @@index([userId])
+  @@map("feed_post_saves")
 }
 
 // 리뷰 댓글

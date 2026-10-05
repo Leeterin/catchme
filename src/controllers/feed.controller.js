@@ -116,6 +116,8 @@ function serializePost(post, myUserId, req) {
     likeCount: post._count ? post._count.likes : likes.length,
     commentCount: post._count ? post._count.comments : (post.comments ? post.comments.length : undefined),
     likedByMe: myUserId ? likes.some((l) => l.userId === myUserId) : false,
+    // 목록 조회(saves를 내 것만 골라 읽음)에서만 들어감 - 수정/작성 응답엔 없어서 프론트의 기존 값을 덮어쓰지 않음
+    ...(post.saves ? { savedByMe: post.saves.length > 0 } : {}),
     createdAt: post.createdAt,
   };
 }
@@ -193,6 +195,7 @@ async function listFeedPosts(req, res) {
       author: { select: { id: true, username: true, name: true, reviewNickname: true } },
       place: { select: { name: true, category: true, location: true, lat: true, lon: true } },
       likes: { select: { userId: true } },
+      saves: { where: { userId: req.userId }, select: { id: true } },
       comments: { select: { rating: true } },
       _count: { select: { likes: true, comments: true } },
     },
@@ -363,6 +366,27 @@ async function toggleLike(req, res) {
   return res.json({ liked: !existing, likeCount });
 }
 
+// POST /api/feed/:id/save  - 저장(⭐) 토글
+async function toggleSave(req, res) {
+  const { id } = req.params;
+  const post = await prisma.feedPost.findUnique({ where: { id }, select: { id: true } });
+  if (!post) return res.status(404).json({ message: '게시물을 찾을 수 없어요.' });
+
+  const existing = await prisma.feedPostSave.findUnique({
+    where: { postId_userId: { postId: id, userId: req.userId } },
+  });
+  if (existing) {
+    await prisma.feedPostSave.delete({ where: { id: existing.id } });
+  } else {
+    try {
+      await prisma.feedPostSave.create({ data: { postId: id, userId: req.userId } });
+    } catch (err) {
+      if (err.code !== 'P2002') throw err; // 거의 동시에 두 번 눌린 경우 - 조용히 무시
+    }
+  }
+  return res.json({ saved: !existing });
+}
+
 // GET /api/feed/:id/comments  - 한 게시물의 댓글 목록
 async function listComments(req, res) {
   const { id } = req.params;
@@ -413,5 +437,5 @@ async function deleteComment(req, res) {
 module.exports = {
   getFeedPhoto,
   listFeedPosts, createFeedPost, updateFeedPost, deleteFeedPost,
-  toggleLike, listComments, createComment, deleteComment,
+  toggleLike, toggleSave, listComments, createComment, deleteComment,
 };

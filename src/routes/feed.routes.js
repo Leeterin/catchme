@@ -3,7 +3,7 @@ const { requireAuth } = require('../middleware/auth.middleware');
 const { writeLimiter } = require('../middleware/rateLimit.middleware');
 const {
   listFeedPosts, createFeedPost, updateFeedPost, deleteFeedPost,
-  toggleLike, listComments, createComment, deleteComment,
+  toggleLike, toggleSave, listComments, createComment, deleteComment,
 } = require('../controllers/feed.controller');
 
 const router = express.Router();
@@ -16,6 +16,7 @@ router.delete('/comments/:commentId', deleteComment); // '/:id'보다 먼저 등
 router.patch('/:id', writeLimiter, updateFeedPost);
 router.delete('/:id', deleteFeedPost);
 router.post('/:id/like', toggleLike);
+router.post('/:id/save', toggleSave);
 router.get('/:id/comments', listComments);
 router.post('/:id/comments', writeLimiter, createComment);
 
