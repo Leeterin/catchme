@@ -228,9 +228,19 @@ function serializeGroup(group) {
   return {
     id: group.id,
     name: group.name,
+    emoji: group.emoji || null,
     createdAt: group.createdAt,
     memberIds: (group.members || []).map((m) => m.friendId),
   };
+}
+
+// 그룹 이모티콘은 한 글자(이모티콘 하나)만 받음 - 빈 값이면 null(앱에서 기본 👥). 잘못된 값이면 undefined
+function parseGroupEmoji(raw) {
+  const v = String(raw == null ? '' : raw).trim();
+  if (!v) return null;
+  if (v.length > 16) return undefined;
+  const graphemes = [...new Intl.Segmenter('ko', { granularity: 'grapheme' }).segment(v)];
+  return graphemes.length === 1 ? v : undefined;
 }
 
 // GET /api/friends/groups
@@ -243,32 +253,44 @@ async function listGroups(req, res) {
   return res.json({ groups: groups.map(serializeGroup) });
 }
 
-// POST /api/friends/groups   body: { name }
+// POST /api/friends/groups   body: { name, emoji? }
 async function createGroup(req, res) {
   const name = String(req.body.name || '').trim();
   if (!name) return res.status(400).json({ message: '그룹 이름을 입력해주세요.' });
   if (name.length > 20) return res.status(400).json({ message: '그룹 이름은 20자 이내로 입력해주세요.' });
+  const emoji = parseGroupEmoji(req.body.emoji);
+  if (emoji === undefined) return res.status(400).json({ message: '이모티콘은 하나만 넣어주세요.' });
 
   const group = await prisma.friendGroup.create({
-    data: { ownerId: req.userId, name },
+    data: { ownerId: req.userId, name, emoji },
     include: { members: { select: { friendId: true } } },
   });
   return res.status(201).json({ group: serializeGroup(group) });
 }
 
-// PATCH /api/friends/groups/:groupId   body: { name }
+// PATCH /api/friends/groups/:groupId   body: { name?, emoji? } (이모티콘만 바꿀 땐 name 없이 보내도 됨)
 async function renameGroup(req, res) {
   const { groupId } = req.params;
-  const name = String(req.body.name || '').trim();
-  if (!name) return res.status(400).json({ message: '그룹 이름을 입력해주세요.' });
-  if (name.length > 20) return res.status(400).json({ message: '그룹 이름은 20자 이내로 입력해주세요.' });
+  const data = {};
+  if (req.body.name !== undefined) {
+    const name = String(req.body.name || '').trim();
+    if (!name) return res.status(400).json({ message: '그룹 이름을 입력해주세요.' });
+    if (name.length > 20) return res.status(400).json({ message: '그룹 이름은 20자 이내로 입력해주세요.' });
+    data.name = name;
+  }
+  if (req.body.emoji !== undefined) {
+    const emoji = parseGroupEmoji(req.body.emoji);
+    if (emoji === undefined) return res.status(400).json({ message: '이모티콘은 하나만 넣어주세요.' });
+    data.emoji = emoji;
+  }
+  if (!Object.keys(data).length) return res.status(400).json({ message: '그룹 이름을 입력해주세요.' });
 
   const group = await prisma.friendGroup.findUnique({ where: { id: groupId } });
   if (!group || group.ownerId !== req.userId) return res.status(404).json({ message: '그룹을 찾을 수 없어요.' });
 
   const updated = await prisma.friendGroup.update({
     where: { id: groupId },
-    data: { name },
+    data,
     include: { members: { select: { friendId: true } } },
   });
   return res.json({ group: serializeGroup(updated) });

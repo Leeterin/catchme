@@ -513,6 +513,7 @@ model FriendGroup {
   ownerId   String
   owner     User     @relation("GroupOwner", fields: [ownerId], references: [id], onDelete: Cascade)
   name      String
+  emoji     String? // 캘린더/공개 범위 칩에 붙는 이모티콘 (없으면 앱에서 👥)
   createdAt DateTime @default(now())
 
   members FriendGroupMember[]
@@ -760,6 +761,8 @@ model UserSettings {
 
   chatReadReceipt Boolean @default(true)
   chatPreview     Boolean @default(true)
+
+  workEmoji String @default("💼") // 업무용 링크에 연 시간에 붙는 이모티콘
 
   updatedAt DateTime @updatedAt
 

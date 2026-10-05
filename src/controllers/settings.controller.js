@@ -13,6 +13,7 @@ const DEFAULTS = {
   friendSearchAllow: true,
   chatReadReceipt: true,
   chatPreview: true,
+  workEmoji: '💼',
 };
 
 function serializeSettings(s) {
@@ -29,6 +30,7 @@ function serializeSettings(s) {
     friendSearchAllow: s.friendSearchAllow,
     chatReadReceipt: s.chatReadReceipt,
     chatPreview: s.chatPreview,
+    workEmoji: s.workEmoji,
   };
 }
 
@@ -48,6 +50,12 @@ async function updateSettings(req, res) {
     if (req.body[key] !== undefined) {
       if (key === 'defaultScheduleView') {
         if (['day', 'week', 'month'].includes(req.body[key])) data[key] = req.body[key];
+      } else if (key === 'workEmoji') {
+        // 업무용 링크 이모티콘 - 하나만 받고, 비우면 기본 💼로
+        const v = String(req.body[key] || '').trim();
+        const graphemes = [...new Intl.Segmenter('ko', { granularity: 'grapheme' }).segment(v)];
+        if (!v) data[key] = '💼';
+        else if (v.length <= 16 && graphemes.length === 1) data[key] = v;
       } else if (typeof req.body[key] === 'boolean') {
         data[key] = req.body[key];
       }
