@@ -60,17 +60,67 @@ async function matchCalendar(req, res) {
   }
 
   const allUserIds = [req.userId, ...others.map((u) => u.id)];
-  const otherUserIds = others.map((u) => u.id);
+  const eventsByUser = await loadMatchEventsByUser(req.userId, others.map((u) => u.id), startDate, endDate);
+  const days = computeMatchDays(eventsByUser, allUserIds, startDate, endDate, minHours)
+    .map((d) => ({ date: d.date, ranges: d.ranges }));
+  return res.json({ days });
+}
 
+// GET /api/events/match-friends?start=&end=&minHours=
+// 홈 "이번 주 시간 맞는 친구" - 친구 한 명씩 "나 + 그 친구" 둘이 겹치게 열어둔 시간을 찾아줌.
+// /match와 같은 규칙(서로 '예약 가능'으로 열어둔 시간만, 바쁨 일정은 제외, 일정 내용은 안 넘김)을 그대로 씀
+async function matchFriends(req, res) {
+  const startDate = new Date(req.query.start);
+  const endDate = new Date(req.query.end);
+  const minHours = Math.max(1, parseInt(req.query.minHours, 10) || 1);
+  if (isNaN(startDate) || isNaN(endDate) || endDate < startDate) {
+    return res.status(400).json({ message: '날짜 범위가 올바르지 않아요.' });
+  }
+  if ((endDate - startDate) / 86400000 > 14) {
+    return res.status(400).json({ message: '한 번에 2주까지만 볼 수 있어요.' });
+  }
+
+  const accepted = await prisma.friendRequest.findMany({
+    where: { status: 'ACCEPTED', OR: [{ senderId: req.userId }, { receiverId: req.userId }] },
+    select: { senderId: true, receiverId: true },
+  });
+  const friendIds = [...new Set(accepted.map((r) => (r.senderId === req.userId ? r.receiverId : r.senderId)))]
+    .filter((id) => id !== req.userId);
+  if (friendIds.length === 0) return res.json({ friends: [], hasFriends: false });
+
+  const friendUsers = await prisma.user.findMany({
+    where: { id: { in: friendIds } },
+    select: { id: true, username: true },
+  });
+  const eventsByUser = await loadMatchEventsByUser(req.userId, friendIds, startDate, endDate);
+  // 나한테 열린 시간이 하루도 없으면 누구와도 안 겹치니 계산하지 않음
+  if (!eventsByUser[req.userId].some((ev) => ev.status === 'AVAILABLE')) return res.json({ friends: [], myAvailability: false });
+
+  const friends = [];
+  friendUsers.forEach((f) => {
+    if (!eventsByUser[f.id].some((ev) => ev.status === 'AVAILABLE')) return;
+    const days = computeMatchDays(eventsByUser, [req.userId, f.id], startDate, endDate, minHours);
+    if (days.length > 0) friends.push({ userId: f.id, username: f.username, days: days.map((d) => ({ date: d.dateKey, ranges: d.ranges })) });
+  });
+  // 가장 빨리 만날 수 있는 친구부터
+  friends.sort((a, b) => (a.days[0].date + String(a.days[0].ranges[0].startMin).padStart(4, '0'))
+    .localeCompare(b.days[0].date + String(b.days[0].ranges[0].startMin).padStart(4, '0')));
+  return res.json({ friends, myAvailability: true });
+}
+
+// /match, /match-friends 공용: viewer와 otherUserIds의 일정 중 viewer에게 보이는 것만 사람별로 모아줌
+// (나만보기는 privateAccess를 켜준 사람 것만, 그룹 공개는 내가 그 그룹에 있을 때만, 업무용 시간은 친구 매칭에 안 씀)
+async function loadMatchEventsByUser(viewerId, otherUserIds, startDate, endDate) {
+  const allUserIds = [viewerId, ...otherUserIds];
   // 다른 참여자들이 "나만보기" 일정까지 나한테 열어줬는지(privateAccess), 그리고 그 사람들의 그룹 중 내가 속한 그룹이 뭔지 미리 가져옴
   const settingsRows = await prisma.friendSettings.findMany({
-    where: { friendId: req.userId, ownerId: { in: otherUserIds } },
+    where: { friendId: viewerId, ownerId: { in: otherUserIds } },
   });
   const privateAccessMap = {};
   settingsRows.forEach((s) => { privateAccessMap[s.ownerId] = s.privateAccess; });
 
   const myMemberships = await prisma.friendGroupMember.findMany({
-    where: { friendId: req.userId, group: { ownerId: { in: otherUserIds } } },
+    where: { friendId: viewerId, group: { ownerId: { in: otherUserIds } } },
     select: { groupId: true, group: { select: { ownerId: true } } },
   });
   const myGroupIdsByOwner = {};
@@ -108,7 +158,7 @@ async function matchCalendar(req, res) {
   // "일만" 열어둔 시간은 친구 매칭에 안 씀 (내 것이든 친구 것이든)
   const events = rawEvents.filter((ev) => {
     if (ev.availableFor === 'work') return false;
-    if (ev.userId === req.userId) return true;
+    if (ev.userId === viewerId) return true;
     if (ev.visiblePrivate) return !!privateAccessMap[ev.userId];
     if (ev.visibleGroupIds && ev.visibleGroupIds.length > 0) {
       const myGroups = myGroupIdsByOwner[ev.userId];
@@ -121,6 +171,12 @@ async function matchCalendar(req, res) {
   allUserIds.forEach((id) => { eventsByUser[id] = []; });
   events.forEach((ev) => { eventsByUser[ev.userId].push(ev); });
 
+  return eventsByUser;
+}
+
+// /match, /match-friends 공용: userIds 전원이 '예약 가능'으로 겹치게 열어둔 시간을 날짜별로 계산
+// (date는 예전 응답 그대로, dateKey는 한국 날짜 YYYY-MM-DD)
+function computeMatchDays(eventsByUser, allUserIds, startDate, endDate, minHours) {
   // dateObj가 나타내는 "그 날짜"를 KST 기준 YYYY-MM-DD 문자열로 바꿈 (서버 시간대 설정과 무관하게)
   function kstDateKeyFromDateObj(dateObj) {
     const shifted = new Date(dateObj.getTime() + 9 * 60 * 60 * 1000);
@@ -194,13 +250,13 @@ async function matchCalendar(req, res) {
       }
     }
     if (ranges.length > 0) {
-      days.push({ date: cursor.toISOString().slice(0, 10), ranges });
+      days.push({ date: cursor.toISOString().slice(0, 10), dateKey, ranges });
     }
     cursor.setDate(cursor.getDate() + 1);
     safety++;
   }
 
-  return res.json({ days });
+  return days;
 }
 
 function serializeEvent(event) {
@@ -702,4 +758,4 @@ async function fetchIcsProxy(req, res) {
   }
 }
 
-module.exports = { listEvents, getEvent, createEvent, updateEvent, deleteEvent, matchCalendar, getFriendDaySchedule, getFriendMonthSchedule, importEvents, fetchIcsProxy };
+module.exports = { listEvents, getEvent, createEvent, updateEvent, deleteEvent, matchCalendar, matchFriends, getFriendDaySchedule, getFriendMonthSchedule, importEvents, fetchIcsProxy };
