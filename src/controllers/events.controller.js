@@ -429,7 +429,10 @@ async function createEvent(req, res) {
     ? recurringWeekdays.filter((n) => Number.isInteger(n) && n >= 0 && n <= 6)
     : [];
 
-  const isPrivate = visibility && typeof visibility.private === 'boolean' ? visibility.private : false;
+  // 메모(그날 맨 위에 뜨는 글)는 시간 개념이 없는 나만 보는 기록이라, 예약/매칭/친구 캘린더 어디에도 안 잡히게
+  // 항상 "바쁨 + 이 시간에도 예약 받기(blocksBooking=false) + 나만보기"로 저장함
+  const isMemo = eventType === 'memo';
+  const isPrivate = isMemo || (visibility && typeof visibility.private === 'boolean' ? visibility.private : false);
   const groupIds = isPrivate ? [] : await sanitizeGroupIds(req.userId, visibility && visibility.groupIds);
 
   const event = await prisma.event.create({
@@ -438,20 +441,20 @@ async function createEvent(req, res) {
       title: title.trim(),
       startTime: new Date(startTime),
       endTime: new Date(endTime),
-      status: status || 'BUSY',
-      eventType: eventType === 'available' ? 'available' : 'busy',
+      status: isMemo ? 'BUSY' : (status || 'BUSY'),
+      eventType: isMemo ? 'memo' : (eventType === 'available' ? 'available' : 'busy'),
       availableFor: sanitizeAvailableFor(availableFor) || 'all',
-      blocksBooking: blocksBooking !== false,
+      blocksBooking: isMemo ? false : blocksBooking !== false,
       visiblePrivate: isPrivate,
       visibleGroupIds: groupIds,
       sourceChatRoomId: typeof sourceChatRoomId === 'string' ? sourceChatRoomId : null,
-      recurringWeekdays: weekdays,
-      recurringUntil: weekdays.length > 0 && recurringUntil ? new Date(recurringUntil) : null,
+      recurringWeekdays: isMemo ? [] : weekdays,
+      recurringUntil: !isMemo && weekdays.length > 0 && recurringUntil ? new Date(recurringUntil) : null,
       color: sanitizeEventColor(color) || null,
       ...(sanitizeTravel(travel) || {}),
     },
   });
-  if (!sourceChatRoomId) track(req.userId, eventType === 'available' ? 'available_created' : 'event_created');
+  if (!sourceChatRoomId && !isMemo) track(req.userId, eventType === 'available' ? 'available_created' : 'event_created');
 
   return res.status(201).json({ event: serializeEvent(event) });
 }
@@ -488,19 +491,22 @@ async function updateEvent(req, res) {
     visibleGroupIdsUpdate = isPrivate ? [] : await sanitizeGroupIds(req.userId, visibility.groupIds);
   }
 
+  // 메모는 수정해도 메모 그대로(예약/매칭에 안 잡히는 나만보기) - 내용과 날짜만 바뀜
+  const isMemo = existing.eventType === 'memo';
+
   const updated = await prisma.event.update({
     where: { id: req.params.id },
     data: {
       title: title !== undefined ? title.trim() : undefined,
       startTime: startTime !== undefined ? nextStart : undefined,
       endTime: endTime !== undefined ? nextEnd : undefined,
-      status: status !== undefined ? status : undefined,
-      eventType: eventType !== undefined ? (eventType === 'available' ? 'available' : 'busy') : undefined,
+      status: isMemo ? undefined : (status !== undefined ? status : undefined),
+      eventType: isMemo ? undefined : (eventType !== undefined ? (eventType === 'available' ? 'available' : 'busy') : undefined),
       availableFor: sanitizeAvailableFor(availableFor),
-      blocksBooking: typeof blocksBooking === 'boolean' ? blocksBooking : undefined,
-      visiblePrivate: visiblePrivateUpdate,
-      visibleGroupIds: visibleGroupIdsUpdate,
-      recurringWeekdays: weekdays,
+      blocksBooking: isMemo ? undefined : (typeof blocksBooking === 'boolean' ? blocksBooking : undefined),
+      visiblePrivate: isMemo ? undefined : visiblePrivateUpdate,
+      visibleGroupIds: isMemo ? undefined : visibleGroupIdsUpdate,
+      recurringWeekdays: isMemo ? undefined : weekdays,
       recurringUntil: recurringUntil !== undefined ? (recurringUntil ? new Date(recurringUntil) : null) : undefined,
       recurringExceptions: Array.isArray(recurringExceptions) ? recurringExceptions : undefined,
       color: sanitizeEventColor(color),
