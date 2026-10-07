@@ -464,6 +464,16 @@ model Event {
   // 본인 화면 표시용이라 친구 캘린더 등 다른 유저 응답에는 내보내지 않음
   color String?
 
+  // 이동시간 (설정에서 켠 사람만 씀) - 목적지/출발지 이름·좌표와 카카오 대중교통으로 구한 이동시간(분).
+  // 내 캘린더에서 일정 바로 앞에 "이동시간" 칸으로 보여줌. 본인 화면용이라 친구 쪽 응답엔 내보내지 않음
+  travelMinutes  Int?
+  travelToName   String?
+  travelToLat    Float?
+  travelToLon    Float?
+  travelFromName String?
+  travelFromLat  Float?
+  travelFromLon  Float?
+
   createdAt DateTime @default(now())
 
   @@index([userId, startTime, endTime])

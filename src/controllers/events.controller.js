@@ -2,6 +2,7 @@ const prisma = require('../lib/prisma');
 const { isBeforeRecurrenceStart } = require('../lib/bookable');
 const { fetchIcs } = require('../lib/icsFetch');
 const { track } = require('../lib/analytics');
+const { getTravelMinutes } = require('../lib/transitTime');
 
 // 친구 일정 보기에서 쓰는 하루 시간 칸 (0~23시)
 const MATCH_HOURS = Array.from({ length: 24 }, (_, i) => i);
@@ -277,6 +278,11 @@ function serializeEvent(event) {
     recurringUntil: event.recurringUntil,
     recurringExceptions: event.recurringExceptions,
     color: event.color || null,
+    travel: typeof event.travelMinutes === 'number' ? {
+      minutes: event.travelMinutes,
+      to: { name: event.travelToName, lat: event.travelToLat, lon: event.travelToLon },
+      from: event.travelFromName ? { name: event.travelFromName, lat: event.travelFromLat, lon: event.travelFromLon } : null,
+    } : null,
     visibility: {
       groupIds: event.visibleGroupIds || [],
       private: event.visiblePrivate,
@@ -375,6 +381,32 @@ async function sanitizeGroupIds(ownerId, groupIds) {
 
 // 일정 색상 입력 정리 - "#RRGGBB" 형식만 받고, 빈 값/null은 "색 지정 안 함"(테마 기본 색)으로 취급.
 // 그 외 이상한 값이면 undefined를 돌려줘서 기존 값을 건드리지 않음
+// 이동시간 입력 정리 - null이면 이동시간 지움, undefined면 그대로 둠(수정), 올바르지 않으면 무시
+// travel: { minutes, to: { name, lat, lon }, from?: { name, lat, lon } }
+function sanitizeTravel(travel) {
+  if (travel === undefined) return undefined;
+  const empty = {
+    travelMinutes: null, travelToName: null, travelToLat: null, travelToLon: null,
+    travelFromName: null, travelFromLat: null, travelFromLon: null,
+  };
+  if (travel === null) return empty;
+  const minutes = Math.round(Number(travel.minutes));
+  const to = travel.to || {};
+  const from = travel.from || null;
+  const okCoord = (p) => p && Number.isFinite(Number(p.lat)) && Number.isFinite(Number(p.lon));
+  if (!Number.isFinite(minutes) || minutes < 0 || minutes > 600 || !okCoord(to)) return undefined;
+  const name = (v) => (typeof v === 'string' ? v.trim().slice(0, 60) : null) || null;
+  return {
+    travelMinutes: minutes,
+    travelToName: name(to.name),
+    travelToLat: Number(to.lat),
+    travelToLon: Number(to.lon),
+    travelFromName: okCoord(from) ? name(from.name) : null,
+    travelFromLat: okCoord(from) ? Number(from.lat) : null,
+    travelFromLon: okCoord(from) ? Number(from.lon) : null,
+  };
+}
+
 function sanitizeEventColor(color) {
   if (color === null || color === '') return null;
   if (typeof color === 'string' && /^#[0-9a-fA-F]{6}$/.test(color)) return color.toUpperCase();
@@ -389,7 +421,7 @@ function sanitizeAvailableFor(v) {
 
 // POST /api/events   body: { title, startTime, endTime, status?, eventType?, visibility?:{groupIds,private}, recurringWeekdays?, recurringUntil?, color? }
 async function createEvent(req, res) {
-  const { title, startTime, endTime, status, eventType, visibility, sourceChatRoomId, recurringWeekdays, recurringUntil, color, availableFor, blocksBooking } = req.body;
+  const { title, startTime, endTime, status, eventType, visibility, sourceChatRoomId, recurringWeekdays, recurringUntil, color, availableFor, blocksBooking, travel } = req.body;
   const { valid, errors } = validateEventInput({ title, startTime, endTime, status });
   if (!valid) return res.status(400).json({ message: '입력값을 확인해주세요.', errors });
 
@@ -416,6 +448,7 @@ async function createEvent(req, res) {
       recurringWeekdays: weekdays,
       recurringUntil: weekdays.length > 0 && recurringUntil ? new Date(recurringUntil) : null,
       color: sanitizeEventColor(color) || null,
+      ...(sanitizeTravel(travel) || {}),
     },
   });
   if (!sourceChatRoomId) track(req.userId, eventType === 'available' ? 'available_created' : 'event_created');
@@ -430,7 +463,7 @@ async function updateEvent(req, res) {
     return res.status(404).json({ message: '일정을 찾을 수 없어요.' });
   }
 
-  const { title, startTime, endTime, status, eventType, visibility, recurringWeekdays, recurringUntil, recurringExceptions, color, availableFor, blocksBooking } = req.body;
+  const { title, startTime, endTime, status, eventType, visibility, recurringWeekdays, recurringUntil, recurringExceptions, color, availableFor, blocksBooking, travel } = req.body;
   const { valid, errors } = validateEventInput({ title, startTime, endTime, status }, { partial: true });
   if (!valid) return res.status(400).json({ message: '입력값을 확인해주세요.', errors });
 
@@ -471,10 +504,23 @@ async function updateEvent(req, res) {
       recurringUntil: recurringUntil !== undefined ? (recurringUntil ? new Date(recurringUntil) : null) : undefined,
       recurringExceptions: Array.isArray(recurringExceptions) ? recurringExceptions : undefined,
       color: sanitizeEventColor(color),
+      ...(sanitizeTravel(travel) || {}),
     },
   });
 
   return res.json({ event: serializeEvent(updated) });
+}
+
+// GET /api/events/travel-time?fromLat=&fromLon=&toLat=&toLon=
+// 일정 이동시간 자동 계산 - 카카오 대중교통 길찾기(실패하면 직선거리로 추정). source: 'kakao' | 'fallback'
+async function travelTime(req, res) {
+  const nums = ['fromLat', 'fromLon', 'toLat', 'toLon'].map((k) => Number(req.query[k]));
+  if (nums.some((n) => !Number.isFinite(n))) {
+    return res.status(400).json({ message: '출발지와 목적지 좌표가 필요해요.' });
+  }
+  const [fromLat, fromLon, toLat, toLon] = nums;
+  const result = await getTravelMinutes({ lat: fromLat, lon: fromLon }, { lat: toLat, lon: toLon });
+  return res.json({ minutes: result.minutes, source: result.source });
 }
 
 // DELETE /api/events/:id
@@ -758,4 +804,4 @@ async function fetchIcsProxy(req, res) {
   }
 }
 
-module.exports = { listEvents, getEvent, createEvent, updateEvent, deleteEvent, matchCalendar, matchFriends, getFriendDaySchedule, getFriendMonthSchedule, importEvents, fetchIcsProxy };
+module.exports = { listEvents, getEvent, createEvent, updateEvent, deleteEvent, travelTime, matchCalendar, matchFriends, getFriendDaySchedule, getFriendMonthSchedule, importEvents, fetchIcsProxy };
