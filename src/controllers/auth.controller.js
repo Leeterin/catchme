@@ -6,7 +6,7 @@ const { validateSignupInput } = require('../lib/validators');
 const { track } = require('../lib/analytics');
 
 const SALT_ROUNDS = 12;
-const REFRESH_TOKEN_DAYS = 30;
+const REFRESH_TOKEN_DAYS = 365; // 1년 동안 한 번도 안 열면 만료, 열 때마다 다시 1년으로 늘어남
 
 // 액세스 토큰(짧게, API 호출마다 검사) - 유출돼도 피해가 크지 않게 유효기간을 짧게 둠
 function signAccessToken(userId) {
@@ -163,12 +163,16 @@ async function refresh(req, res) {
     return res.status(401).json({ message: '로그인이 만료됐어요. 다시 로그인해주세요.' });
   }
 
-  // 기존 토큰은 지우고 새 토큰을 발급 (재사용 방지)
-  await prisma.refreshToken.delete({ where: { id: stored.id } });
+  // 리프레시 토큰은 그대로 두고 유효기간만 지금부터 다시 늘려줌 (앱을 쓰는 한 로그아웃되지 않게).
+  // 예전엔 쓸 때마다 새 토큰으로 바꿨는데, 응답을 받기 전에 앱이 꺼지거나 인터넷이 끊기면
+  // 서버엔 옛 토큰이 지워지고 폰엔 새 토큰이 저장 안 돼서, 다음에 앱을 열면 로그아웃돼 있었음
+  await prisma.refreshToken.update({
+    where: { id: stored.id },
+    data: { expiresAt: new Date(Date.now() + REFRESH_TOKEN_DAYS * 24 * 60 * 60 * 1000) },
+  });
   const newAccessToken = signAccessToken(stored.userId);
-  const newRefreshToken = await createRefreshToken(stored.userId);
 
-  return res.json({ token: newAccessToken, refreshToken: newRefreshToken });
+  return res.json({ token: newAccessToken, refreshToken: stored.token });
 }
 
 // POST /api/auth/logout   body: { refreshToken }
