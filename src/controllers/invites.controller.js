@@ -88,6 +88,24 @@ function cleanRanges(raw, cells) {
   return [...out].sort();
 }
 
+// 1005 -> "16:45" (1440 -> "24:00")
+function hmStr(v) {
+  return `${pad2(Math.floor(v / 60))}:${pad2(v % 60)}`;
+}
+
+// 1시간 칸들 -> 날짜별로 이어진 묶음 [{ date, s, e }] (분)
+function cellBlocks(cells) {
+  const out = [];
+  [...cells].sort().forEach((c) => {
+    const [date, hh] = c.split('|');
+    const h = Number(hh);
+    const last = out[out.length - 1];
+    if (last && last.date === date && last.e === h * 60) last.e = h * 60 + 60;
+    else out.push({ date, s: h * 60, e: h * 60 + 60 });
+  });
+  return out;
+}
+
 function addDaysStr(dateStr, n) {
   return new Date(new Date(`${dateStr}T00:00:00Z`).getTime() + n * 86400000).toISOString().slice(0, 10);
 }
@@ -185,9 +203,37 @@ async function availableCellsFor(userId, dates, startHour = 0, endHour = 24, aud
   return cells;
 }
 
+// 직접 고르기 링크에서 5분 단위로 연 시간 { 날짜: [[시작분, 끝분]] } - manualCells에 "YYYY-MM-DD|HH:MM|HH:MM"로 저장
+// (예전 링크는 1시간 칸 "YYYY-MM-DD|HH"라 null)
+function manualOpenMinutes(poll) {
+  if (poll.fromCalendar || !poll.manualCells || !poll.manualCells.length) return null;
+  const map = {};
+  poll.manualCells.forEach((x) => {
+    const [date, a, b] = String(x).split('|');
+    const s = parseHm(a);
+    const e = parseHm(b);
+    if (s === null || e === null || s >= e) return;
+    (map[date] = map[date] || []).push([s, e]);
+  });
+  return Object.keys(map).length ? map : null;
+}
+
+// s~e분 중 연 시간 안에 드는 조각들
+function clipToOpen(open, date, s, e) {
+  return (open[date] || []).map(([a, b]) => [Math.max(s, a), Math.min(e, b)]).filter(([a, b]) => a < b);
+}
+
 // 캘린더 기준 링크면 지금 열려있는 칸들, 아니면 null(범위 안 전부 가능)
 async function openCellsForPoll(poll) {
-  // 직접 고르기에서 날짜마다 따로 연 칸 - 링크에 저장된 그대로 (캘린더와 상관없음)
+  // 직접 고르기에서 날짜마다 따로 연 시간 - 링크에 저장된 그대로 (캘린더와 상관없음). 조금이라도 열린 1시간 칸은 고를 수 있음
+  const open = manualOpenMinutes(poll);
+  if (open) {
+    const cells = new Set();
+    Object.keys(open).forEach((date) => open[date].forEach(([s, e]) => {
+      for (let h = Math.floor(s / 60); h * 60 < e; h++) cells.add(`${date}|${pad2(h)}`);
+    }));
+    return cells;
+  }
   if (!poll.fromCalendar && poll.manualCells && poll.manualCells.length) return new Set(poll.manualCells);
   if (!poll.fromCalendar || poll.status !== 'OPEN') return null;
   return availableCellsFor(poll.creatorId, poll.dates, poll.startHour, poll.endHour, poll.audience);
@@ -220,6 +266,8 @@ function serializePoll(poll, { userId, guestKey, openCells } = {}) {
       : null,
     // 캘린더 기준 링크: 지금 고를 수 있는 칸 (만든 사람의 예약 가능 시간). null이면 범위 안 전부
     openCells: openCells ? [...openCells].sort() : null,
+    // 직접 고르기 링크: 5분 단위로 연 시간 "YYYY-MM-DD|HH:MM|HH:MM" (칸 안에서 실제로 열린 부분)
+    openRanges: manualOpenMinutes(poll) ? [...poll.manualCells].sort() : null,
     status: poll.status,
     expired: isPollExpired(poll),
     confirmedStart: poll.confirmedStart,
@@ -333,7 +381,8 @@ async function myAvailability(req, res) {
 
 // POST /api/invites  { title, dates: ["YYYY-MM-DD"], startHour, endHour, fromCalendar, cells?, audience?(friends|work|group:<id>), place? }
 // fromCalendar면 startHour/endHour는 무시하고, 고른 날짜들의 내 예약 가능 시간으로 범위를 정함
-// cells(["YYYY-MM-DD|HH"])가 있으면 직접 고르기 - 날짜마다 따로 연 칸으로 날짜·범위를 정함 (링크에만 저장)
+// ranges(["YYYY-MM-DD|HH:MM|HH:MM"], 5분 단위)가 있으면 직접 고르기 - 날짜마다 따로 연 시간으로 날짜·범위를 정함 (링크에만 저장)
+// (예전 앱은 cells(["YYYY-MM-DD|HH"]) 1시간 칸으로 보냄)
 async function createInvite(req, res) {
   try {
     const title = String(req.body.title || '').trim().slice(0, MAX_TITLE);
@@ -346,7 +395,31 @@ async function createInvite(req, res) {
     if (!title) return res.status(400).json({ message: '약속 이름을 적어주세요.' });
     let dates = [...new Set(rawDates.filter(isValidDateStr))].sort();
     let manualCells = [];
-    if (!fromCalendar && Array.isArray(req.body.cells) && req.body.cells.length) {
+    if (!fromCalendar && Array.isArray(req.body.ranges) && req.body.ranges.length) {
+      const byDate = {};
+      req.body.ranges.slice(0, 400).forEach((r) => {
+        const [date, a, b] = String(r).split('|');
+        const s = parseHm(a);
+        const e = parseHm(b);
+        if (!isValidDateStr(date) || s === null || e === null || s >= e) return;
+        (byDate[date] = byDate[date] || []).push([s, e]);
+      });
+      // 겹치거나 붙은 시간은 하나로
+      Object.keys(byDate).sort().forEach((date) => {
+        const merged = [];
+        byDate[date].sort((x, y) => x[0] - y[0]).forEach(([s, e]) => {
+          const last = merged[merged.length - 1];
+          if (last && s <= last[1]) last[1] = Math.max(last[1], e);
+          else merged.push([s, e]);
+        });
+        merged.forEach(([s, e]) => manualCells.push(`${date}|${hmStr(s)}|${hmStr(e)}`));
+      });
+      if (manualCells.length === 0) return res.status(400).json({ message: '열어둘 시간을 하나 이상 골라주세요.' });
+      const mins = manualCells.map((c) => c.split('|').slice(1).map(parseHm));
+      startHour = Math.floor(Math.min(...mins.map((m) => m[0])) / 60);
+      endHour = Math.ceil(Math.max(...mins.map((m) => m[1])) / 60);
+      dates = Object.keys(byDate).sort();
+    } else if (!fromCalendar && Array.isArray(req.body.cells) && req.body.cells.length) {
       manualCells = [...new Set(req.body.cells.filter((c) => {
         const m = /^(\d{4}-\d{2}-\d{2})\|(\d{2})$/.exec(String(c));
         return m && isValidDateStr(m[1]) && Number(m[2]) <= 23;
@@ -461,7 +534,21 @@ async function respondInvite(req, res) {
       return res.status(400).json({ message: openCells || picked.length ? '고른 시간이 이제 안 돼요. 다시 골라주세요.' : '가능한 시간을 하나 이상 골라주세요.' });
     }
 
-    const ranges = cleanRanges(req.body.ranges, cells);
+    let ranges = cleanRanges(req.body.ranges, cells);
+    // 5분 단위로 연 링크면 고른 칸을 연 시간 안으로 잘라서 저장 (칸 안에서 열린 부분만 "돼요")
+    const open = manualOpenMinutes(poll);
+    if (open) {
+      const fine = ranges.map((r) => { const [d, a, b] = r.split('|'); return [d, parseHm(a), parseHm(b)]; });
+      const out = [];
+      cellBlocks(cells).forEach(({ date, s, e }) => {
+        const inside = fine.filter(([d, a, b]) => d === date && a >= s && b <= e);
+        (inside.length ? inside.map(([, a, b]) => [a, b]) : [[s, e]]).forEach(([a, b]) => {
+          clipToOpen(open, date, a, b).forEach(([x, y]) => out.push(`${date}|${hmStr(x)}|${hmStr(y)}`));
+        });
+      });
+      ranges = [...new Set(out)].sort();
+      if (!ranges.length) return res.status(400).json({ message: '고른 시간이 이제 안 돼요. 다시 골라주세요.' });
+    }
 
     const existing = findMyResponse(poll, { userId: req.userId, guestKey });
     if (!existing && poll.responses.length >= MAX_RESPONSES) {
@@ -524,6 +611,10 @@ async function confirmInvite(req, res) {
     }
     // 캘린더 기준 링크면 지금도 예약 가능으로 열려 있는 칸으로만 확정 - 친구가 고른 뒤 캘린더에서 닫은 칸은 안 됨
     // (친구 응답은 지우지 않고 남겨둠 - 다시 열면 그대로 살아남)
+    const open = manualOpenMinutes(poll);
+    if (open && !(open[date] || []).some(([s, e]) => s <= startMin && e >= endMin)) {
+      return res.status(409).json({ message: '링크에 열어둔 시간으로만 확정할 수 있어요.' });
+    }
     const openCells = await openCellsForPoll(poll);
     if (openCells) {
       for (let h = Math.floor(startMin / 60); h * 60 < endMin; h++) {
@@ -720,6 +811,13 @@ function dateLabelKo(dateStr) {
 // 아직 안 지난 고를 수 있는 칸들을 날짜별로 이어진 시간대로 묶음 -> [{ date, start, end }]
 function upcomingRanges(poll, openCells) {
   const nowMs = Date.now();
+  // 5분 단위로 연 링크는 연 시간 그대로 (시는 소수 - 16:30이면 16.5)
+  const open = manualOpenMinutes(poll);
+  if (open) {
+    return Object.keys(open).sort().flatMap((date) => open[date]
+      .filter(([, e]) => kstDate(date, e / 60).getTime() > nowMs)
+      .map(([s, e]) => ({ date, start: s / 60, end: e / 60 })));
+  }
   const cells = [...validCellSet(poll, openCells)]
     .filter((c) => { const [d, h] = c.split('|'); return kstDate(d, Number(h) + 1).getTime() > nowMs; })
     .sort();
