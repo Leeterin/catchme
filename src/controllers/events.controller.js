@@ -2,7 +2,7 @@ const prisma = require('../lib/prisma');
 const { isBeforeRecurrenceStart } = require('../lib/bookable');
 const { fetchIcs } = require('../lib/icsFetch');
 const { track } = require('../lib/analytics');
-const { getTravelMinutes } = require('../lib/transitTime');
+const { getTripMinutes } = require('../lib/transitTime');
 
 // 친구 일정 보기에서 쓰는 하루 시간 칸 (0~23시)
 const MATCH_HOURS = Array.from({ length: 24 }, (_, i) => i);
@@ -554,16 +554,20 @@ async function updateEvent(req, res) {
   return res.json({ event: serializeEvent(updated) });
 }
 
-// GET /api/events/travel-time?fromLat=&fromLon=&toLat=&toLon=
-// 일정 이동시간 자동 계산 - 카카오 대중교통 길찾기(실패하면 직선거리로 추정). source: 'kakao' | 'fallback'
+// GET /api/events/travel-time?fromLat=&fromLon=&toLat=&toLon=&mode=car|transit&arriveAt=ISO
+// 일정 이동시간 자동 계산 - 일정 시작(arriveAt)에 도착하려고 출발하는 시각의 교통 기준 (자동차: 카카오내비 예측, 대중교통: 카카오 대중교통)
+// 실패하면 직선거리로 추정. source: 'kakao' | 'fallback', departAt: 출발 시각, night: 새벽이라 대중교통이 거의 없음
 async function travelTime(req, res) {
   const nums = ['fromLat', 'fromLon', 'toLat', 'toLon'].map((k) => Number(req.query[k]));
   if (nums.some((n) => !Number.isFinite(n))) {
     return res.status(400).json({ message: '출발지와 목적지 좌표가 필요해요.' });
   }
   const [fromLat, fromLon, toLat, toLon] = nums;
-  const result = await getTravelMinutes({ lat: fromLat, lon: fromLon }, { lat: toLat, lon: toLon });
-  return res.json({ minutes: result.minutes, source: result.source });
+  const mode = req.query.mode === 'car' ? 'car' : 'transit';
+  const arrive = new Date(req.query.arriveAt);
+  const arriveAt = Number.isNaN(arrive.getTime()) ? new Date() : arrive;
+  const result = await getTripMinutes({ lat: fromLat, lon: fromLon }, { lat: toLat, lon: toLon }, mode, arriveAt);
+  return res.json({ minutes: result.minutes, source: result.source, mode, departAt: result.departAt.toISOString(), night: result.night });
 }
 
 // DELETE /api/events/:id

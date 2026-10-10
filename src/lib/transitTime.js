@@ -52,6 +52,82 @@ async function getTravelMinutes(from, to) {
   return { minutes, source: 'fallback' };
 }
 
+// ---------- 일정 이동시간: 자동차 / 대중교통 + 출발 시각 기준 ----------
+// 자동차는 카카오모빌리티 길찾기 - 출발 시각이 미래면 "미래 운행 정보"(그 시각 예상 교통량)로, 지금이면 실시간 교통으로 계산.
+//   GET https://apis-navi.kakaomobility.com/v1/future/directions?origin=x,y&destination=x,y&departure_time=YYYYMMDDHHmm
+//   GET https://apis-navi.kakaomobility.com/v1/directions?origin=x,y&destination=x,y
+//   응답: routes[0].result_code === 0 이면 routes[0].summary.duration (초)
+// 실패하면 직선거리 ÷ (시간대별 평균속도)로 추정 - 출퇴근 시간은 느리게, 새벽은 빠르게
+const KAKAO_NAVI_URL = 'https://apis-navi.kakaomobility.com/v1';
+const ROAD_FACTOR = 1.35; // 직선거리 → 실제 도로 거리 대략 비율
+
+// KST 기준 요일(0=일)·시(0~23)·카카오 출발 시각 문자열(YYYYMMDDHHmm)
+function kstParts(date) {
+  const k = new Date(date.getTime() + 9 * 3600 * 1000);
+  const p = (n) => String(n).padStart(2, '0');
+  return {
+    dow: k.getUTCDay(),
+    hour: k.getUTCHours(),
+    stamp: `${k.getUTCFullYear()}${p(k.getUTCMonth() + 1)}${p(k.getUTCDate())}${p(k.getUTCHours())}${p(k.getUTCMinutes())}`,
+  };
+}
+function isNightHour(hour) { return hour >= 0 && hour < 5; }
+function isRushHour(dow, hour) { return dow >= 1 && dow <= 5 && ((hour >= 7 && hour < 10) || (hour >= 17 && hour < 20)); }
+
+function estimateMinutes(from, to, mode, departAt) {
+  const { dow, hour } = kstParts(departAt);
+  let kmh;
+  if (mode === 'car') kmh = isNightHour(hour) ? 45 : isRushHour(dow, hour) ? 18 : 28;
+  else kmh = isRushHour(dow, hour) ? 17 : FALLBACK_SPEED_KMH;
+  const km = distanceKm(from.lat, from.lon, to.lat, to.lon) * (mode === 'car' ? ROAD_FACTOR : 1);
+  return Math.max(FALLBACK_MIN_MINUTES, Math.round((km / kmh) * 60));
+}
+
+async function getCarMinutes(from, to, departAt) {
+  const key = process.env.KAKAO_REST_API_KEY;
+  if (key) {
+    try {
+      const future = departAt.getTime() > Date.now() + 5 * 60 * 1000;
+      const params = new URLSearchParams({ origin: `${from.lon},${from.lat}`, destination: `${to.lon},${to.lat}` });
+      if (future) params.set('departure_time', kstParts(departAt).stamp);
+      const r = await fetch(`${KAKAO_NAVI_URL}/${future ? 'future/' : ''}directions?${params.toString()}`, {
+        headers: { Authorization: `KakaoAK ${key}` },
+      });
+      if (r.ok) {
+        const data = await r.json();
+        const route = Array.isArray(data.routes) ? data.routes[0] : null;
+        if (route && route.result_code === 0 && route.summary && Number.isFinite(route.summary.duration)) {
+          return { minutes: Math.max(1, Math.round(route.summary.duration / 60)), source: 'kakao' };
+        }
+      } else {
+        const text = await r.text().catch(() => '');
+        console.warn('[transitTime] 카카오 자동차 길찾기 응답 오류:', r.status, text.slice(0, 200));
+      }
+    } catch (err) {
+      console.warn('[transitTime] 카카오 자동차 길찾기 호출 실패:', err.message);
+    }
+  }
+  return { minutes: estimateMinutes(from, to, 'car', departAt), source: 'fallback' };
+}
+
+// 일정 시작(arriveAt)에 맞춰 도착하려면 몇 분 걸리고 언제 출발하는지 - 출발 시각의 교통 상황 기준.
+// 자동차는 "30분 전 출발"로 한 번 재고, 그 결과로 정한 출발 시각으로 다시 재서 맞춤
+async function getTripMinutes(from, to, mode, arriveAt) {
+  const departFor = (m) => new Date(arriveAt.getTime() - m * 60 * 1000);
+  let result;
+  if (mode === 'car') {
+    result = await getCarMinutes(from, to, departFor(30));
+    if (Math.abs(result.minutes - 30) > 2) result = await getCarMinutes(from, to, departFor(result.minutes));
+  } else {
+    result = await getTravelMinutes(from, to);
+    // 카카오 대중교통 길찾기는 시각을 안 받아서, 추정치일 때만 출발 시간대 속도로 다시 계산
+    if (result.source === 'fallback') result = { minutes: estimateMinutes(from, to, 'transit', departFor(result.minutes)), source: 'fallback' };
+  }
+  const departAt = departFor(result.minutes);
+  // 새벽 대중교통은 지하철·버스가 거의 없어서 화면에 알려줌
+  return { ...result, mode, departAt, night: mode === 'transit' && isNightHour(kstParts(departAt).hour) };
+}
+
 // 여러 출발지 x 여러 후보지 조합을 한 번에 계산 (동시 호출 수를 제한해서 API 과다호출 방지)
 // origins/destinations: { lat, lon } 배열. 반환: minutes[originIdx][destIdx], source는 하나라도 fallback이면 'mixed'
 async function getTravelMinutesMatrix(origins, destinations, concurrency = 8) {
@@ -82,4 +158,4 @@ async function getTravelMinutesMatrix(origins, destinations, concurrency = 8) {
   return { minutes, source: anyFallback ? 'mixed' : 'kakao' };
 }
 
-module.exports = { getTravelMinutes, getTravelMinutesMatrix };
+module.exports = { getTravelMinutes, getTravelMinutesMatrix, getTripMinutes };
