@@ -26,6 +26,7 @@ const {
   fixLocationSuggest,
   createGroupRoom,
   leaveRoom,
+  deleteRoom,
   markRoomRead,
   setRoomMuted,
   listPins,
@@ -55,6 +56,7 @@ router.post('/:roomId/reservations', sendReservationRequest);
 router.post('/:roomId/time-proposals', sendTimeProposal);
 router.post('/:roomId/location-suggestions', sendLocationSuggest);
 router.post('/:roomId/leave', leaveRoom);
+router.delete('/:roomId', deleteRoom);
 router.post('/:roomId/read', markRoomRead);
 router.post('/:roomId/mute', setRoomMuted);
 router.get('/:roomId/pins', listPins);

@@ -1788,6 +1788,24 @@ async function leaveRoom(req, res) {
   return res.json({ message: '채팅방을 나갔어요.' });
 }
 
+// DELETE /api/chats/:roomId — 채팅방을 모든 멤버에게서 지움 (메시지·고정 일정도 같이 지워짐)
+async function deleteRoom(req, res) {
+  const { roomId } = req.params;
+
+  if (!(await assertMembership(roomId, req.userId))) {
+    return res.status(403).json({ message: '이 채팅방에 속해있지 않아요.' });
+  }
+
+  // 지우고 나면 멤버 목록이 없어지니, 알릴 사람을 먼저 구해둠
+  const otherIds = await getOtherMemberIds(roomId, req.userId);
+  await prisma.chatRoom.delete({ where: { id: roomId } });
+
+  const io = getIo();
+  if (io) otherIds.forEach((userId) => io.to(`user:${userId}`).emit('chatRoomDeleted', { roomId }));
+
+  return res.json({ message: '채팅방을 삭제했어요.' });
+}
+
 const acceptReservation = (req, res) => respondToReservation(req, res, 'CONFIRMED');
 const declineReservation = (req, res) => respondToReservation(req, res, 'DECLINED');
 const acceptLocationSuggest = (req, res) => respondToLocationSuggest(req, res, 'CONFIRMED');
@@ -2274,6 +2292,7 @@ module.exports = {
   fixLocationSuggest,
   createGroupRoom,
   leaveRoom,
+  deleteRoom,
   markRoomRead,
   setRoomMuted,
   listPins,
