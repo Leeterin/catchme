@@ -14,6 +14,7 @@ const DEFAULTS = {
   chatReadReceipt: true,
   chatPreview: true,
   workEmoji: '💼',
+  colorLabels: [],
 };
 
 function serializeSettings(s) {
@@ -31,6 +32,7 @@ function serializeSettings(s) {
     chatReadReceipt: s.chatReadReceipt,
     chatPreview: s.chatPreview,
     workEmoji: s.workEmoji,
+    colorLabels: s.colorLabels,
   };
 }
 
@@ -56,6 +58,11 @@ async function updateSettings(req, res) {
         const graphemes = [...new Intl.Segmenter('ko', { granularity: 'grapheme' }).segment(v)];
         if (!v) data[key] = '💼';
         else if (v.length <= 16 && graphemes.length === 1) data[key] = v;
+      } else if (key === 'colorLabels') {
+        // 일정 색 라벨 이름 - 10개까지, 하나당 12자까지 (빈칸은 기본 이름)
+        if (Array.isArray(req.body[key])) {
+          data[key] = req.body[key].slice(0, 10).map((n) => (typeof n === 'string' ? n.trim().slice(0, 12) : ''));
+        }
       } else if (typeof req.body[key] === 'boolean') {
         data[key] = req.body[key];
       }

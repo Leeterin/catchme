@@ -803,6 +803,7 @@ model UserSettings {
   chatPreview     Boolean @default(true)
 
   workEmoji String @default("💼") // 업무용 링크에 연 시간에 붙는 이모티콘
+  colorLabels String[] @default([]) // 일정 색 라벨 10개 이름 (빈칸 = 기본 이름)
 
   updatedAt DateTime @updatedAt
 
