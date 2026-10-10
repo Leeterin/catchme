@@ -41,6 +41,19 @@ function todayKstStr() {
   return now.toISOString().slice(0, 10);
 }
 
+// 응답 받는 중인데 후보 날짜의 마지막 시간까지 다 지났으면 "마감" - 따로 저장하지 않고 볼 때마다 계산
+function isPollExpired(poll) {
+  if (poll.status !== 'OPEN' || !poll.dates.length) return false;
+  const last = [...poll.dates].sort().pop();
+  return kstDate(last, poll.endHour).getTime() <= Date.now();
+}
+
+// 이미 끝난 1시간 칸인지 (진행 중인 칸은 아직 고를 수 있음)
+function isPastCell(cell) {
+  const [d, h] = cell.split('|');
+  return kstDate(d, Number(h) + 1).getTime() <= Date.now();
+}
+
 function validCellSet(poll, openCells) {
   const set = new Set();
   poll.dates.forEach((d) => {
@@ -206,6 +219,7 @@ function serializePoll(poll, { userId, guestKey, openCells } = {}) {
     // 캘린더 기준 링크: 지금 고를 수 있는 칸 (만든 사람의 예약 가능 시간). null이면 범위 안 전부
     openCells: openCells ? [...openCells].sort() : null,
     status: poll.status,
+    expired: isPollExpired(poll),
     confirmedStart: poll.confirmedStart,
     confirmedEnd: poll.confirmedEnd,
     isCreator: !!userId && poll.creatorId === userId,
@@ -412,6 +426,7 @@ async function respondInvite(req, res) {
     if (poll.status !== 'OPEN') {
       return res.status(409).json({ message: poll.status === 'CONFIRMED' ? '이미 시간이 확정된 약속이에요.' : '취소된 약속이에요.' });
     }
+    if (isPollExpired(poll)) return res.status(409).json({ message: '날짜가 지나서 마감된 약속이에요.' });
     if (req.userId && poll.creatorId === req.userId) {
       return res.status(400).json({ message: '내가 만든 약속이에요. 친구들의 응답을 기다려주세요.' });
     }
@@ -423,9 +438,11 @@ async function respondInvite(req, res) {
 
     const openCells = await openCellsForPoll(poll);
     const valid = validCellSet(poll, openCells);
-    const cells = [...new Set(Array.isArray(req.body.cells) ? req.body.cells : [])].filter((c) => valid.has(c)).sort();
+    // 이미 지난 칸은 버림 (지난주 시간에 "돼요"가 쌓이지 않게)
+    const picked = [...new Set(Array.isArray(req.body.cells) ? req.body.cells : [])];
+    const cells = picked.filter((c) => valid.has(c) && !isPastCell(c)).sort();
     if (cells.length === 0) {
-      return res.status(400).json({ message: openCells ? '고른 시간이 이제 안 돼요. 다시 골라주세요.' : '가능한 시간을 하나 이상 골라주세요.' });
+      return res.status(400).json({ message: openCells || picked.length ? '고른 시간이 이제 안 돼요. 다시 골라주세요.' : '가능한 시간을 하나 이상 골라주세요.' });
     }
 
     const ranges = cleanRanges(req.body.ranges, cells);
@@ -688,6 +705,9 @@ function invitePreview(poll, openCells) {
       title: `약속 확정: ${dateLabelKo(dateStr)} ${hourRangeKo(sh, eh)}`,
       description: `${poll.title}${where} · ${who}님과의 약속이 정해졌어요`,
     };
+  }
+  if (isPollExpired(poll)) {
+    return { title: `${who}님이 약속 시간을 물어봤어요`, description: `${poll.title}${where} · 날짜가 지나 마감된 링크예요` };
   }
   const ranges = upcomingRanges(poll, openCells);
   if (!ranges.length) {
