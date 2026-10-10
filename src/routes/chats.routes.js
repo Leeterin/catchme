@@ -39,6 +39,7 @@ const {
   completeLocationRecommendNow,
   cancelLocationRecommend,
   getActiveLocationRecommend,
+  deleteMessage,
 } = require('../controllers/chats.controller');
 
 const router = express.Router();
@@ -63,6 +64,7 @@ router.get('/:roomId/pins', listPins);
 router.post('/:roomId/pins', createPin);
 router.patch('/pins/:pinId', updatePin);
 router.delete('/pins/:pinId', deletePin);
+router.delete('/messages/:messageId', deleteMessage);
 router.post('/messages/:messageId/accept', acceptReservation);
 router.post('/messages/:messageId/decline', declineReservation);
 router.post('/messages/:messageId/withdraw', withdrawReservation);

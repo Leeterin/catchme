@@ -1806,6 +1806,26 @@ async function deleteRoom(req, res) {
   return res.json({ message: '채팅방을 삭제했어요.' });
 }
 
+// DELETE /api/chats/messages/:messageId — 내가 보낸 글·사진을 모두에게서 지움
+// (예약·제안 카드는 일정과 엮여 있어서 각자의 취소 버튼으로만 처리)
+async function deleteMessage(req, res) {
+  const message = await prisma.message.findUnique({
+    where: { id: req.params.messageId },
+    select: { id: true, chatRoomId: true, senderId: true, type: true },
+  });
+  if (!message || message.senderId !== req.userId) {
+    return res.status(404).json({ message: '메시지를 찾을 수 없어요.' });
+  }
+  if (message.type !== 'TEXT' && message.type !== 'IMAGE') {
+    return res.status(400).json({ message: '글과 사진만 삭제할 수 있어요.' });
+  }
+
+  await prisma.message.delete({ where: { id: message.id } });
+  await notifyRoom(message.chatRoomId, req.userId, 'messageDeleted', { roomId: message.chatRoomId, messageId: message.id });
+
+  return res.json({ message: '메시지를 삭제했어요.' });
+}
+
 const acceptReservation = (req, res) => respondToReservation(req, res, 'CONFIRMED');
 const declineReservation = (req, res) => respondToReservation(req, res, 'DECLINED');
 const acceptLocationSuggest = (req, res) => respondToLocationSuggest(req, res, 'CONFIRMED');
@@ -2293,6 +2313,7 @@ module.exports = {
   createGroupRoom,
   leaveRoom,
   deleteRoom,
+  deleteMessage,
   markRoomRead,
   setRoomMuted,
   listPins,
