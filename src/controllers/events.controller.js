@@ -283,6 +283,13 @@ function serializeEvent(event) {
       to: { name: event.travelToName, lat: event.travelToLat, lon: event.travelToLon },
       from: event.travelFromName ? { name: event.travelFromName, lat: event.travelFromLat, lon: event.travelFromLon } : null,
     } : null,
+    note: event.note || null,
+    place: event.placeName ? {
+      name: event.placeName,
+      address: event.placeAddress || null,
+      lat: event.placeLat,
+      lon: event.placeLon,
+    } : null,
     visibility: {
       groupIds: event.visibleGroupIds || [],
       private: event.visiblePrivate,
@@ -407,6 +414,32 @@ function sanitizeTravel(travel) {
   };
 }
 
+// 일정 메모 - null/빈 값이면 지움, undefined면 그대로 둠(수정), 500자까지만
+function sanitizeNote(note) {
+  if (note === undefined) return undefined;
+  if (note === null) return null;
+  if (typeof note !== 'string') return undefined;
+  return note.trim().slice(0, 500) || null;
+}
+
+// 일정 장소 - null이면 지움, undefined면 그대로 둠(수정), 이름이 없으면 무시
+// place: { name, address?, lat?, lon? }
+function sanitizePlace(place) {
+  if (place === undefined) return undefined;
+  const empty = { placeName: null, placeAddress: null, placeLat: null, placeLon: null };
+  if (place === null) return empty;
+  const name = typeof place.name === 'string' ? place.name.trim().slice(0, 80) : '';
+  if (!name) return undefined;
+  const okCoord = Number.isFinite(Number(place.lat)) && Number.isFinite(Number(place.lon))
+    && place.lat !== null && place.lon !== null;
+  return {
+    placeName: name,
+    placeAddress: typeof place.address === 'string' ? (place.address.trim().slice(0, 120) || null) : null,
+    placeLat: okCoord ? Number(place.lat) : null,
+    placeLon: okCoord ? Number(place.lon) : null,
+  };
+}
+
 function sanitizeEventColor(color) {
   if (color === null || color === '') return null;
   if (typeof color === 'string' && /^#[0-9a-fA-F]{6}$/.test(color)) return color.toUpperCase();
@@ -421,7 +454,7 @@ function sanitizeAvailableFor(v) {
 
 // POST /api/events   body: { title, startTime, endTime, status?, eventType?, visibility?:{groupIds,private}, recurringWeekdays?, recurringUntil?, color? }
 async function createEvent(req, res) {
-  const { title, startTime, endTime, status, eventType, visibility, sourceChatRoomId, recurringWeekdays, recurringUntil, color, availableFor, blocksBooking, travel } = req.body;
+  const { title, startTime, endTime, status, eventType, visibility, sourceChatRoomId, recurringWeekdays, recurringUntil, color, availableFor, blocksBooking, travel, note, place } = req.body;
   const { valid, errors } = validateEventInput({ title, startTime, endTime, status });
   if (!valid) return res.status(400).json({ message: '입력값을 확인해주세요.', errors });
 
@@ -452,6 +485,8 @@ async function createEvent(req, res) {
       recurringUntil: !isMemo && weekdays.length > 0 && recurringUntil ? new Date(recurringUntil) : null,
       color: sanitizeEventColor(color) || null,
       ...(sanitizeTravel(travel) || {}),
+      note: sanitizeNote(note),
+      ...(sanitizePlace(place) || {}),
     },
   });
   if (!sourceChatRoomId && !isMemo) track(req.userId, eventType === 'available' ? 'available_created' : 'event_created');
@@ -466,7 +501,7 @@ async function updateEvent(req, res) {
     return res.status(404).json({ message: '일정을 찾을 수 없어요.' });
   }
 
-  const { title, startTime, endTime, status, eventType, visibility, recurringWeekdays, recurringUntil, recurringExceptions, color, availableFor, blocksBooking, travel } = req.body;
+  const { title, startTime, endTime, status, eventType, visibility, recurringWeekdays, recurringUntil, recurringExceptions, color, availableFor, blocksBooking, travel, note, place } = req.body;
   const { valid, errors } = validateEventInput({ title, startTime, endTime, status }, { partial: true });
   if (!valid) return res.status(400).json({ message: '입력값을 확인해주세요.', errors });
 
@@ -511,6 +546,8 @@ async function updateEvent(req, res) {
       recurringExceptions: Array.isArray(recurringExceptions) ? recurringExceptions : undefined,
       color: sanitizeEventColor(color),
       ...(sanitizeTravel(travel) || {}),
+      note: sanitizeNote(note),
+      ...(sanitizePlace(place) || {}),
     },
   });
 

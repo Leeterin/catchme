@@ -474,6 +474,13 @@ model Event {
   travelFromLat  Float?
   travelFromLon  Float?
 
+  // 일정 메모·장소 - 본인 화면용이라 친구 쪽 응답엔 내보내지 않음. 장소 좌표는 지도로 열 때 씀
+  note         String?
+  placeName    String?
+  placeAddress String?
+  placeLat     Float?
+  placeLon     Float?
+
   createdAt DateTime @default(now())
 
   @@index([userId, startTime, endTime])
