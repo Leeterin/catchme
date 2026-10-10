@@ -611,7 +611,138 @@ async function claimInvite(req, res) {
   }
 }
 
+// ------------------------------------------------------------
+// 카톡 등에 공유할 링크 미리보기 (GET /i/:token)
+// 프론트는 정적 사이트라 링크마다 다른 미리보기를 못 만들어서, 서버가 오픈그래프 태그만 담긴 작은 페이지를
+// 돌려주고 사람이 열면 바로 프론트(?invite=토큰)로 넘김. 카톡 미리보기 수집기는 자바스크립트를 안 돌려서
+// 태그만 읽어감 -> "민지님의 비는 시간: 이번 주 수요일 오후 3시~6시" 같은 카드가 됨
+// ------------------------------------------------------------
+const WEEKDAY_KO = ['일', '월', '화', '수', '목', '금', '토'];
+
+function escapeHtml(s) {
+  return String(s).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c]);
+}
+
+// 14 -> "오후 2시", 9.5 -> "오전 9시 30분" (24 = 밤 12시)
+function hourLabelKo(h, { dropPeriod = false } = {}) {
+  const hh = Math.floor(h);
+  const mm = Math.round((h - hh) * 60);
+  const period = hh === 0 || hh === 24 ? '밤' : hh < 12 ? '오전' : '오후';
+  const h12 = hh % 12 === 0 ? 12 : hh % 12;
+  return `${dropPeriod ? '' : `${period} `}${h12}시${mm ? ` ${mm}분` : ''}`;
+}
+
+// "오후 3시~6시" 처럼 같은 오전/오후면 뒤쪽은 생략
+function hourRangeKo(start, end) {
+  const samePeriod = (start < 12) === (end <= 12) && end !== 24;
+  return `${hourLabelKo(start)}~${hourLabelKo(end, { dropPeriod: samePeriod })}`;
+}
+
+// 오늘 기준 "오늘" / "내일" / "이번 주 수요일" / "다음 주 수요일" / "10월 21일(화)" (한국 시간, 주는 월요일 시작)
+function dateLabelKo(dateStr) {
+  const day = new Date(`${dateStr}T00:00:00+09:00`);
+  const today = new Date(`${todayKstStr()}T00:00:00+09:00`);
+  const diff = Math.round((day - today) / 86400000);
+  const wd = new Date(`${dateStr}T12:00:00Z`).getUTCDay();
+  if (diff === 0) return '오늘';
+  if (diff === 1) return '내일';
+  const todayWd = new Date(`${todayKstStr()}T12:00:00Z`).getUTCDay();
+  const mondayOffset = (todayWd + 6) % 7; // 오늘이 이번 주 월요일에서 며칠째인지
+  const week = Math.floor((diff + mondayOffset) / 7);
+  if (diff > 0 && week === 0) return `이번 주 ${WEEKDAY_KO[wd]}요일`;
+  if (diff > 0 && week === 1) return `다음 주 ${WEEKDAY_KO[wd]}요일`;
+  const [, m, d] = dateStr.split('-').map(Number);
+  return `${m}월 ${d}일(${WEEKDAY_KO[wd]})`;
+}
+
+// 아직 안 지난 고를 수 있는 칸들을 날짜별로 이어진 시간대로 묶음 -> [{ date, start, end }]
+function upcomingRanges(poll, openCells) {
+  const nowMs = Date.now();
+  const cells = [...validCellSet(poll, openCells)]
+    .filter((c) => { const [d, h] = c.split('|'); return kstDate(d, Number(h) + 1).getTime() > nowMs; })
+    .sort();
+  const ranges = [];
+  cells.forEach((c) => {
+    const [date, hs] = c.split('|');
+    const h = Number(hs);
+    const last = ranges[ranges.length - 1];
+    if (last && last.date === date && last.end === h) last.end = h + 1;
+    else ranges.push({ date, start: h, end: h + 1 });
+  });
+  return ranges;
+}
+
+function invitePreview(poll, openCells) {
+  if (!poll) return { title: '캐치미 약속 링크', description: '링크를 찾을 수 없어요.' };
+  const who = (poll.creator && (poll.creator.name || poll.creator.username)) || '친구';
+  const where = poll.placeName ? ` @ ${poll.placeName}` : '';
+  if (poll.status === 'CANCELLED') return { title: `${poll.title}`, description: '취소된 약속이에요.' };
+  if (poll.status === 'CONFIRMED' && poll.confirmedStart && poll.confirmedEnd) {
+    const kst = (dt) => new Date(dt.getTime() + 9 * 3600000);
+    const s = kst(poll.confirmedStart);
+    const e = kst(poll.confirmedEnd);
+    const dateStr = s.toISOString().slice(0, 10);
+    const sh = s.getUTCHours() + s.getUTCMinutes() / 60;
+    const eh = e.toISOString().slice(0, 10) === dateStr ? e.getUTCHours() + e.getUTCMinutes() / 60 : 24;
+    return {
+      title: `약속 확정: ${dateLabelKo(dateStr)} ${hourRangeKo(sh, eh)}`,
+      description: `${poll.title}${where} · ${who}님과의 약속이 정해졌어요`,
+    };
+  }
+  const ranges = upcomingRanges(poll, openCells);
+  if (!ranges.length) {
+    return { title: `${who}님이 약속 시간을 물어봐요`, description: `${poll.title}${where} · 지금은 고를 수 있는 시간이 없어요` };
+  }
+  const label = (r) => `${dateLabelKo(r.date)} ${hourRangeKo(r.start, r.end)}`;
+  const more = ranges.length > 1 ? ` 외 ${ranges.length - 1}개` : '';
+  return {
+    title: `${who}님의 비는 시간: ${label(ranges[0])}${more}`,
+    description: `${poll.title}${where} · 가입 없이 되는 시간만 눌러주세요`,
+  };
+}
+
+// GET /i/:token
+async function shareInvitePage(req, res) {
+  const frontend = (process.env.FRONTEND_URL || 'https://catchme-29rt.onrender.com/').replace(/\/+$/, '');
+  const token = String(req.params.token || '');
+  const target = `${frontend}/?invite=${encodeURIComponent(token)}`;
+  let preview;
+  try {
+    const poll = await findPollByToken(token);
+    preview = invitePreview(poll, poll ? await openCellsForPoll(poll) : null);
+  } catch (err) {
+    console.error('[shareInvitePage]', err);
+    preview = { title: '캐치미 약속 링크', description: '되는 시간만 눌러주세요' };
+  }
+  const self = `${req.protocol}://${req.get('host')}`;
+  const t = escapeHtml(preview.title);
+  const d = escapeHtml(preview.description);
+  const u = escapeHtml(target);
+  res.set('Cache-Control', 'no-cache');
+  res.type('html').send(`<!doctype html>
+<html lang="ko"><head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>${t}</title>
+<meta name="description" content="${d}">
+<meta property="og:type" content="website">
+<meta property="og:site_name" content="캐치미">
+<meta property="og:title" content="${t}">
+<meta property="og:description" content="${d}">
+<meta property="og:image" content="${escapeHtml(`${self}/share/catchme.png`)}">
+<meta property="og:image:width" content="600">
+<meta property="og:image:height" content="600">
+<meta property="og:url" content="${escapeHtml(`${self}/i/${encodeURIComponent(token)}`)}">
+<meta name="twitter:card" content="summary">
+</head><body data-target="${u}" style="font-family:sans-serif;text-align:center;padding:40px 16px">
+<p>${t}</p>
+<p><a href="${u}">캐치미에서 열기</a></p>
+<script src="/share/go.js"></script>
+</body></html>`);
+}
+
 module.exports = {
+  shareInvitePage,
   myAvailability,
   createInvite,
   listMyInvites,

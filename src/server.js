@@ -166,6 +166,12 @@ app.post('/api/cron/tick', (req, res, next) => {
 // 이라 위 adminRoutes(requireAuth + requireAdmin)를 통과 못 하면 아무 데이터도 못 봄.
 app.use('/admin', express.static(path.join(__dirname, '../public/admin')));
 
+// 카톡 등에 공유하는 약속 링크 미리보기 카드 (오픈그래프) - 사람이 열면 프론트의 ?invite=토큰 화면으로 넘어감
+app.get('/i/:token', (req, res, next) => require('./controllers/invites.controller').shareInvitePage(req, res).catch(next));
+app.use('/share', express.static(path.join(__dirname, '../public/share'), {
+  setHeaders: (res) => res.set('Cross-Origin-Resource-Policy', 'cross-origin'),
+}));
+
 app.use(notFoundHandler);
 app.use(errorHandler);
 
