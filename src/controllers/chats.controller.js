@@ -722,6 +722,9 @@ async function sendReservationRequest(req, res) {
     const receiver = await prisma.user.findUnique({ where: { id: otherMemberIds[0] }, select: { name: true } });
     if (receiver && receiver.name) holdTitle = `${receiver.name}님에게 약속 요청중`;
   }
+  // 날짜 미정 약속의 "날짜 정하기"로 보낸 요청이면 그 약속을 기억해둠 - 확정되면 그 약속의 장소들이 이 일정에 붙음
+  // (RESERVATION은 locationPinId 칸을 안 써서 그 칸에 남김)
+  const meetPin = await findUndatedMeetingPin(prisma, roomId, req.body.forPinId);
 
   const message = await prisma.$transaction(async (tx) => {
     const createdMessage = await tx.message.create({
@@ -736,6 +739,7 @@ async function sendReservationRequest(req, res) {
         reservationLocationLat: typeof locationLat === 'number' ? locationLat : null,
         reservationLocationLon: typeof locationLon === 'number' ? locationLon : null,
         reservationStatus: 'PENDING',
+        locationPinId: meetPin ? meetPin.id : null,
       },
     });
 
@@ -800,6 +804,7 @@ async function respondToReservation(req, res, status) {
   }
 
   let updated;
+  let movedSuggestIds = [];
   try {
     updated = await prisma.$transaction(async (tx) => {
       // 상태가 여전히 PENDING일 때만 업데이트되도록 조건을 걸어서, 거의 동시에 두 번 요청이 와도
@@ -852,7 +857,7 @@ async function respondToReservation(req, res, status) {
       // 확정된 예약을 채팅방에 핀으로도 고정
       const dateLabel = formatDateLabel(message.reservationStart);
       const timeLabel = formatTimeLabel(message.reservationStart, message.reservationEnd);
-      await tx.pinnedItem.create({
+      const datedPin = await tx.pinnedItem.create({
         data: {
           chatRoomId: message.chatRoomId,
           dateLabel,
@@ -862,6 +867,7 @@ async function respondToReservation(req, res, status) {
           sourceMessageId: message.id,
         },
       });
+      movedSuggestIds = await attachUndatedMeetingTx(tx, message.chatRoomId, message.locationPinId, datedPin.id);
     }
 
     return tx.message.findUnique({ where: { id: messageId } });
@@ -872,7 +878,8 @@ async function respondToReservation(req, res, status) {
   }
 
   await notifyRoom(message.chatRoomId, req.userId, 'newMessage', { roomId: message.chatRoomId, message: serializeMessage(updated) });
-  const whenLabel = `${formatDateLabel(message.reservationStart)} ${formatTimeLabel(message.reservationStart, message.reservationEnd)}`;
+  if (movedSuggestIds.length) await broadcastLocationSuggests(message.chatRoomId, null, movedSuggestIds);
+  const whenLabel =`${formatDateLabel(message.reservationStart)} ${formatTimeLabel(message.reservationStart, message.reservationEnd)}`;
   if (status === 'CONFIRMED' && updated?.reservationStatus === 'CONFIRMED') {
     pushToRoom(message.chatRoomId, req.userId, `약속이 확정됐어요! ${whenLabel}`);
   } else if (status === 'DECLINED') {
@@ -948,22 +955,13 @@ async function cancelReservationMessage(req, res) {
       throw Object.assign(new Error('이미 취소된 약속이에요.'), { statusCode: 409 });
     }
     const result = await tx.message.findUnique({ where: { id: messageId } });
-    // 이 예약 자체의 핀뿐 아니라, 같은 방에 날짜 없이 "장소만" 임시로 잡아둔 핀("여기 어때요?" 제안 등으로
-    // 따로 생긴 핀)도 이 약속의 장소였을 테니 같이 지움. 안 그러면 약속은 지워졌는데 장소 카드만 채팅방에
-    // 유령처럼 남음.
+    // 이 예약 자체의 핀뿐 아니라, 이 약속에 붙은 "장소만" 있는 핀("여기 어때요?" 제안 등으로 정해진 2차 장소 등)도
+    // 같이 지움. 안 그러면 약속은 지워졌는데 장소 카드만 채팅방에 유령처럼 남음.
     // 주의: 예전엔 이 방의 핀을 전부(chatRoomId 조건만으로) 지웠는데, 그룹 채팅방은 날짜가 다른 약속이
     // 여러 개 동시에 핀으로 떠 있을 수 있어서(여러 PinnedItem 동시 존재) 그 경우 관계없는 다른 확정 약속의
-    // 핀까지 전부 사라지는 버그였음. sourceMessageId로 "이 예약 자신의 핀"만, 그리고 날짜 없는
-    // "장소만 있는" 핀만 지우도록 조건을 좁힘 - 날짜(dateLabel)가 있는 다른 약속의 핀은 그대로 남김
-    await tx.pinnedItem.deleteMany({
-      where: {
-        chatRoomId: message.chatRoomId,
-        OR: [
-          { sourceMessageId: messageId },
-          { dateLabel: null },
-        ],
-      },
-    });
+    // 핀까지 전부 사라지는 버그였음. 이 예약 자신의 핀과 그 약속에 붙은 장소 핀만 지움
+    // (날짜 미정 약속이 여러 개일 수 있어서, 날짜 없는 핀을 통째로 지우면 다른 약속의 장소까지 사라짐)
+    await tx.pinnedItem.deleteMany({ where: await meetingPinsWhere(tx, message.chatRoomId, messageId) });
 
     // 확정되면서 양쪽 캘린더에 생겼던 "약속" 일정을 실제로 지움 (안 지우면 취소해도 유령처럼 계속 남음)
     const linkedEvents = await tx.event.findMany({ where: { sourceMessageId: messageId, isPendingHold: false } });
@@ -1033,16 +1031,44 @@ async function restoreAvailabilityChoice(req, res) {
 // 장소 제안 하나를 확정 - 이 방의 약속 장소 목록에 다음 장소(1차 → 2차 → ...)로 추가하고, 같은 방에서 아직
 // 대기 중이던 다른 후보들은 마감(DECLINED) 처리 (이번 투표 판은 끝남 - 다음 장소는 새로 후보를 올려서 정함).
 // (투표로 정해졌든, 투표 없이 픽스했든, 1:1에서 수락했든 결과는 같음) 반드시 트랜잭션(tx) 안에서 호출
-// 같은 약속을 위한 장소 제안끼리만 묶음 (확정되면 마감, 투표는 한 사람당 하나) - 특정 약속을 위한 제안이면
-// 그 약속 것 + 약속 없이(날짜 미정일 때) 올라온 제안, 약속 없이 올린 제안이면 같은 것끼리
+// 같은 약속을 위한 장소 제안끼리만 묶음 (확정되면 마감, 투표는 한 사람당 하나).
+// 약속 없이(pinId 없이) 올린 제안은 "새 약속" 후보 - 확정되면 날짜 미정 약속이 새로 하나 생김
 function locationGroupWhere(pinId) {
-  return pinId ? { OR: [{ locationPinId: pinId }, { locationPinId: null }] } : { locationPinId: null };
+  return { locationPinId: pinId || null };
 }
-// 같은 약속에 이미 정해진 "장소만 있는 핀" - since 이후에 날짜 미정으로 정한 것도 포함
-// (예전 약속에서 정했던 장소 때문에 같은 곳을 다시 못 고르는 일이 없게)
-function placePinGroupWhere(pinId, since) {
-  const undated = { forPinId: null, createdAt: { gt: since } };
-  return pinId ? { OR: [{ forPinId: pinId }, undated] } : undated;
+
+// 날짜 미정 약속 = 날짜 없이 장소부터 정한 약속. 그 약속의 첫 장소 핀(dateLabel, forPinId 둘 다 없음)이 약속 자체이고,
+// 2차, 3차 장소는 forPinId로 그 핀을 가리킴. 그래서 한 방에 날짜 미정 약속이 여러 개 있을 수 있음
+async function findUndatedMeetingPin(db, chatRoomId, pinId) {
+  if (typeof pinId !== 'string' || !pinId) return null;
+  return db.pinnedItem.findFirst({ where: { id: pinId, chatRoomId, dateLabel: null, forPinId: null }, select: { id: true } });
+}
+// 날짜 미정 약속에 날짜가 정해지면 그 약속의 장소들(첫 장소 포함)과 장소 제안들을 새 일정 핀 밑으로 옮김.
+// 옮긴 장소 제안 id들을 돌려줌 (방 사람들에게 다시 알려야 해서)
+async function attachUndatedMeetingTx(tx, chatRoomId, undatedPinId, datedPinId) {
+  const root = await findUndatedMeetingPin(tx, chatRoomId, undatedPinId);
+  if (!root) return [];
+  await tx.pinnedItem.updateMany({
+    where: { chatRoomId, dateLabel: null, OR: [{ id: root.id }, { forPinId: root.id }] },
+    data: { forPinId: datedPinId },
+  });
+  const moved = await tx.message.findMany({
+    where: { chatRoomId, type: 'LOCATION_SUGGEST', locationPinId: root.id },
+    select: { id: true },
+  });
+  if (moved.length) {
+    await tx.message.updateMany({ where: { id: { in: moved.map((m) => m.id) } }, data: { locationPinId: datedPinId } });
+  }
+  return moved.map((m) => m.id);
+}
+// 약속(일정 핀)을 취소할 때 지울 핀들 - 그 일정 핀 + 그 약속에 붙은 장소 핀들 (다른 약속의 장소는 그대로)
+async function meetingPinsWhere(tx, chatRoomId, sourceMessageId) {
+  const own = await tx.pinnedItem.findMany({ where: { chatRoomId, sourceMessageId, dateLabel: { not: null } }, select: { id: true } });
+  const ownIds = own.map((p) => p.id);
+  return {
+    chatRoomId,
+    OR: [{ sourceMessageId }, ...(ownIds.length ? [{ forPinId: { in: ownIds } }] : [])],
+  };
 }
 
 async function confirmLocationSuggestionTx(tx, message) {
@@ -1055,16 +1081,17 @@ async function confirmLocationSuggestionTx(tx, message) {
     locationLat: message.locationLat,
     locationLon: message.locationLon,
   };
-  // 이미 같은 장소가 정해져 있으면 또 쌓지 않음
+  // 같은 약속에 이미 같은 장소가 정해져 있으면 또 쌓지 않음.
+  // 약속 없이 올린 제안(pinId 없음)은 새 날짜 미정 약속의 첫 장소가 됨 - 다른 약속에서 정했던 곳이어도 그대로 새로 만듦
   const pinId = message.locationPinId || null;
-  const samePlacePin = await tx.pinnedItem.findFirst({
+  const samePlacePin = pinId ? await tx.pinnedItem.findFirst({
     where: {
       chatRoomId: message.chatRoomId,
       location: { equals: message.locationPlace, mode: 'insensitive' },
-      AND: [{ OR: [...(pinId ? [{ id: pinId }] : []), placePinGroupWhere(pinId, message.createdAt)] }],
+      OR: [{ id: pinId }, { forPinId: pinId }],
     },
     select: { id: true },
-  });
+  }) : null;
   if (!samePlacePin) {
     await tx.pinnedItem.create({
       data: {
@@ -1167,8 +1194,8 @@ async function pendingLocationSuggestIds(chatRoomId) {
 
 // POST /api/chats/:roomId/location-suggestions   body: { place, note?, location?, locationLat?, locationLon?, immediate?, pinId?, cycleStart? }
 // immediate=true면 협의 없이 바로 확정(핀 고정)까지 함 (기존 "바로 이 장소로 확정" 기능)
-// pinId: 어느 약속(상단 고정 카드)을 위한 제안인지 (없으면 날짜 미정 약속)
-// cycleStart: 이 방에서 마지막으로 끝난 약속이 끝난 시각(ms) - 그 전에 올라온 제안/장소는 지난 약속 것이라 중복 검사에서 뺌
+// pinId: 어느 약속(상단 고정 카드 - 일정 핀 또는 날짜 미정 약속)을 위한 제안인지 (없으면 새 약속 - 확정되면 날짜 미정 약속이 새로 생김)
+// cycleStart: 이 방에서 마지막으로 끝난 약속이 끝난 시각(ms) - 그 전에 올라온 제안은 지난 약속 것이라 중복 검사에서 뺌
 // newRound: 채팅 + 버튼에서 장소 정하기를 새로 시작함 - 같은 약속의 대기 중인 후보는 마감하고 이 제안부터 1번으로 매김
 //           (LOCATION_SUGGEST는 text 칸을 안 써서 그 칸에 표시만 남김)
 async function sendLocationSuggest(req, res) {
@@ -1184,8 +1211,12 @@ async function sendLocationSuggest(req, res) {
   }
 
   const trimmedPlace = place.trim();
+  // 어느 약속의 장소인지 - 날짜가 있는 일정 핀이거나 날짜 미정 약속(첫 장소 핀)
   const targetPin = typeof req.body.pinId === 'string' && req.body.pinId
-    ? await prisma.pinnedItem.findFirst({ where: { id: req.body.pinId, chatRoomId: roomId, dateLabel: { not: null } }, select: { id: true } })
+    ? await prisma.pinnedItem.findFirst({
+      where: { id: req.body.pinId, chatRoomId: roomId, OR: [{ dateLabel: { not: null } }, { forPinId: null, location: { not: null } }] },
+      select: { id: true },
+    })
     : null;
   const pinId = targetPin ? targetPin.id : null;
   const since = new Date(Number.isFinite(req.body.cycleStart) ? req.body.cycleStart : 0);
@@ -1221,15 +1252,15 @@ async function sendLocationSuggest(req, res) {
     return res.status(409).json({ message: `"${trimmedPlace}"은(는) 이미 제안되어 답변을 기다리고 있어요.` });
   }
 
-  // 이미 이 장소로 확정돼 있으면(날짜 없이 장소만 고정해둔 핀) 또 제안/픽스할 필요가 없음
-  const alreadyConfirmedPin = await prisma.pinnedItem.findFirst({
+  // 같은 약속에 이미 이 장소로 정해져 있으면 또 제안/픽스할 필요가 없음.
+  // 새 약속(pinId 없음)은 다른 약속에서 정했던 장소도 다시 고를 수 있음
+  const alreadyConfirmedPin = pinId ? await prisma.pinnedItem.findFirst({
     where: {
       chatRoomId: roomId,
-      dateLabel: null,
       location: { equals: trimmedPlace, mode: 'insensitive' },
-      ...placePinGroupWhere(pinId, since),
+      OR: [{ id: pinId }, { forPinId: pinId }],
     },
-  });
+  }) : null;
   if (alreadyConfirmedPin) {
     return res.status(409).json({ message: `"${trimmedPlace}"은(는) 이미 확정된 장소예요.` });
   }
@@ -1490,6 +1521,7 @@ async function maybeConfirmProposal(message, roomId, actorId) {
   };
 
   let confirmedNow = false;
+  let movedSuggestIds = [];
   const result = await prisma.$transaction(async (tx) => {
     // proposalStatus가 여전히 VOTING일 때만 확정되도록 조건을 걸어서, 마지막 투표가 거의 동시에 두 번 들어와도
     // 딱 한 번만 확정 처리되게 함 (동시에 통과해서 일정이 중복 생성되는 경쟁 상태 방지)
@@ -1518,7 +1550,7 @@ async function maybeConfirmProposal(message, roomId, actorId) {
       })),
     });
 
-    await tx.pinnedItem.create({
+    const datedPin = await tx.pinnedItem.create({
       data: {
         chatRoomId: roomId,
         dateLabel: formatDateLabel(winner.startTime),
@@ -1528,9 +1560,11 @@ async function maybeConfirmProposal(message, roomId, actorId) {
         sourceMessageId: message.id,
       },
     });
+    movedSuggestIds = await attachUndatedMeetingTx(tx, roomId, message.locationPinId, datedPin.id);
 
     return tx.message.findUnique({ where: { id: message.id }, include: PROPOSAL_INCLUDE });
   });
+  if (movedSuggestIds.length) await broadcastLocationSuggests(roomId, null, movedSuggestIds);
   if (confirmedNow) pushToRoom(roomId, actorId, `약속이 확정됐어요! ${formatDateLabel(winner.startTime)} ${formatTimeLabel(winner.startTime, winner.endTime)}`);
   return result;
 }
@@ -1565,12 +1599,15 @@ async function sendTimeProposal(req, res) {
     parsedOptions.push({ start, end });
   }
 
+  // 날짜 미정 약속의 "날짜 정하기"로 보낸 제안이면 그 약속을 기억해둠 (예약 요청과 같은 방식)
+  const meetPin = await findUndatedMeetingPin(prisma, roomId, req.body.forPinId);
   const created = await prisma.message.create({
     data: {
       chatRoomId: roomId,
       senderId: req.userId,
       type: 'TIME_PROPOSAL',
       proposalStatus: 'VOTING',
+      locationPinId: meetPin ? meetPin.id : null,
       proposalOptions: { create: parsedOptions.map((o) => ({ startTime: o.start, endTime: o.end })) },
     },
     include: PROPOSAL_INCLUDE,
@@ -1651,16 +1688,8 @@ async function cancelTimeProposal(req, res) {
     });
     // 이 제안 자체의 핀뿐 아니라, 날짜 없이 "장소만" 임시로 잡아둔 핀도 이 약속의 장소였을 테니 같이 지움.
     // (1:1 예약 취소의 cancelReservationMessage와 같은 이유로, chatRoomId만으로 지우면 그룹방에 동시에
-    // 떠 있는 다른 날짜의 확정 약속 핀까지 같이 지워지는 버그였음 - sourceMessageId/날짜없는 핀만 좁혀서 지움)
-    await tx.pinnedItem.deleteMany({
-      where: {
-        chatRoomId: message.chatRoomId,
-        OR: [
-          { sourceMessageId: messageId },
-          { dateLabel: null },
-        ],
-      },
-    });
+    // 떠 있는 다른 날짜의 확정 약속 핀까지 같이 지워지는 버그였음 - 이 약속의 핀과 거기 붙은 장소 핀만 지움)
+    await tx.pinnedItem.deleteMany({ where: await meetingPinsWhere(tx, message.chatRoomId, messageId) });
 
     // 이미 확정돼서 다들 캘린더에 "약속"이 생겨있던 상태였다면, 그 일정들도 실제로 지우고 예약가능을 복원함
     if (wasConfirmed) {
@@ -1863,7 +1892,20 @@ async function deletePin(req, res) {
   if (!pin || !(await assertMembership(pin.chatRoomId, req.userId))) {
     return res.status(404).json({ message: '핀을 찾을 수 없어요.' });
   }
-  await prisma.pinnedItem.delete({ where: { id: pinId } });
+  await prisma.$transaction(async (tx) => {
+    // 날짜 미정 약속의 첫 장소를 지우면 다음 장소가 그 약속의 첫 장소가 됨 (안 그러면 2차 장소들이 갈 곳 없이 사라짐)
+    if (!pin.dateLabel && !pin.forPinId) {
+      const rest = await tx.pinnedItem.findMany({ where: { chatRoomId: pin.chatRoomId, forPinId: pin.id }, orderBy: { createdAt: 'asc' }, select: { id: true } });
+      if (rest.length) {
+        await tx.pinnedItem.update({ where: { id: rest[0].id }, data: { forPinId: null } });
+        if (rest.length > 1) {
+          await tx.pinnedItem.updateMany({ where: { id: { in: rest.slice(1).map((p) => p.id) } }, data: { forPinId: rest[0].id } });
+        }
+        await tx.message.updateMany({ where: { chatRoomId: pin.chatRoomId, type: 'LOCATION_SUGGEST', locationPinId: pin.id }, data: { locationPinId: rest[0].id } });
+      }
+    }
+    await tx.pinnedItem.delete({ where: { id: pinId } });
+  });
   return res.json({ message: '핀을 삭제했어요.' });
 }
 
