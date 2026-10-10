@@ -106,6 +106,7 @@ function serializeMessage(message) {
         locationLon: message.locationLon,
         placeId: message.locationPlaceId || null,
         pinId: message.locationPinId || null,
+        newRound: message.text === 'NEW_ROUND', // 채팅 + 버튼에서 새로 시작한 제안(번호가 1번부터 다시 매겨짐)
         status: message.locationStatus,
         voterIds: (message.locationVotes || []).map((v) => v.userId),
       },
@@ -1168,6 +1169,8 @@ async function pendingLocationSuggestIds(chatRoomId) {
 // immediate=true면 협의 없이 바로 확정(핀 고정)까지 함 (기존 "바로 이 장소로 확정" 기능)
 // pinId: 어느 약속(상단 고정 카드)을 위한 제안인지 (없으면 날짜 미정 약속)
 // cycleStart: 이 방에서 마지막으로 끝난 약속이 끝난 시각(ms) - 그 전에 올라온 제안/장소는 지난 약속 것이라 중복 검사에서 뺌
+// newRound: 채팅 + 버튼에서 장소 정하기를 새로 시작함 - 같은 약속의 대기 중인 후보는 마감하고 이 제안부터 1번으로 매김
+//           (LOCATION_SUGGEST는 text 칸을 안 써서 그 칸에 표시만 남김)
 async function sendLocationSuggest(req, res) {
   const { roomId } = req.params;
   const { place, note, location, locationLat, locationLon, immediate } = req.body;
@@ -1186,6 +1189,19 @@ async function sendLocationSuggest(req, res) {
     : null;
   const pinId = targetPin ? targetPin.id : null;
   const since = new Date(Number.isFinite(req.body.cycleStart) ? req.body.cycleStart : 0);
+  const newRound = req.body.newRound === true && !immediate;
+
+  let closedIds = [];
+  if (newRound) {
+    const old = await prisma.message.findMany({
+      where: { chatRoomId: roomId, type: 'LOCATION_SUGGEST', locationStatus: 'PENDING', ...locationGroupWhere(pinId) },
+      select: { id: true },
+    });
+    closedIds = old.map((r) => r.id);
+    if (closedIds.length) {
+      await prisma.message.updateMany({ where: { id: { in: closedIds } }, data: { locationStatus: 'DECLINED' } });
+    }
+  }
 
   // 아직 답변을 기다리고 있는(PENDING) 같은 장소 제안이 있는지 확인 (같은 약속을 위한 것만)
   const pendingForPlace = await prisma.message.findFirst({
@@ -1247,6 +1263,7 @@ async function sendLocationSuggest(req, res) {
       locationPlaceId: placeRow ? placeRow.id : null,
       locationStatus: immediate ? 'CONFIRMED' : 'PENDING',
       locationPinId: pinId,
+      text: newRound ? 'NEW_ROUND' : null,
     },
   });
   await recordPlaceEvent(prisma, { placeId: message.locationPlaceId, type: 'SUGGEST', userId: req.userId, chatRoomId: roomId, messageId: message.id });
@@ -1261,6 +1278,11 @@ async function sendLocationSuggest(req, res) {
     return res.status(201).json({ message: updatedMessages.find((m) => m.id === message.id), updatedMessages });
   }
 
+  if (closedIds.length) {
+    // 마감된 예전 후보들도 같이 알림
+    const updatedMessages = await broadcastLocationSuggests(roomId, req.userId, [...closedIds, message.id]);
+    return res.status(201).json({ message: updatedMessages.find((m) => m.id === message.id), updatedMessages });
+  }
   await notifyRoom(roomId, req.userId, 'newMessage', { roomId, message: serializeMessage(message) });
   return res.status(201).json({ message: serializeMessage(message) });
 }
