@@ -187,6 +187,8 @@ async function availableCellsFor(userId, dates, startHour = 0, endHour = 24, aud
 
 // 캘린더 기준 링크면 지금 열려있는 칸들, 아니면 null(범위 안 전부 가능)
 async function openCellsForPoll(poll) {
+  // 직접 고르기에서 날짜마다 따로 연 칸 - 링크에 저장된 그대로 (캘린더와 상관없음)
+  if (!poll.fromCalendar && poll.manualCells && poll.manualCells.length) return new Set(poll.manualCells);
   if (!poll.fromCalendar || poll.status !== 'OPEN') return null;
   return availableCellsFor(poll.creatorId, poll.dates, poll.startHour, poll.endHour, poll.audience);
 }
@@ -329,8 +331,9 @@ async function myAvailability(req, res) {
   }
 }
 
-// POST /api/invites  { title, dates: ["YYYY-MM-DD"], startHour, endHour, fromCalendar, audience?(friends|work|group:<id>), place? }
+// POST /api/invites  { title, dates: ["YYYY-MM-DD"], startHour, endHour, fromCalendar, cells?, audience?(friends|work|group:<id>), place? }
 // fromCalendar면 startHour/endHour는 무시하고, 고른 날짜들의 내 예약 가능 시간으로 범위를 정함
+// cells(["YYYY-MM-DD|HH"])가 있으면 직접 고르기 - 날짜마다 따로 연 칸으로 날짜·범위를 정함 (링크에만 저장)
 async function createInvite(req, res) {
   try {
     const title = String(req.body.title || '').trim().slice(0, MAX_TITLE);
@@ -342,6 +345,18 @@ async function createInvite(req, res) {
 
     if (!title) return res.status(400).json({ message: '약속 이름을 적어주세요.' });
     let dates = [...new Set(rawDates.filter(isValidDateStr))].sort();
+    let manualCells = [];
+    if (!fromCalendar && Array.isArray(req.body.cells) && req.body.cells.length) {
+      manualCells = [...new Set(req.body.cells.filter((c) => {
+        const m = /^(\d{4}-\d{2}-\d{2})\|(\d{2})$/.exec(String(c));
+        return m && isValidDateStr(m[1]) && Number(m[2]) <= 23;
+      }))].sort();
+      if (manualCells.length === 0) return res.status(400).json({ message: '열어둘 시간을 하나 이상 골라주세요.' });
+      const hours = manualCells.map((c) => Number(c.split('|')[1]));
+      startHour = Math.min(...hours);
+      endHour = Math.max(...hours) + 1;
+      dates = [...new Set(manualCells.map((c) => c.split('|')[0]))].sort();
+    }
     if (fromCalendar && dates.length > 0 && dates.length <= MAX_DATES) {
       const cells = [...await availableCellsFor(req.userId, dates, 0, 24, audience)];
       if (cells.length === 0) {
@@ -375,6 +390,7 @@ async function createInvite(req, res) {
         startHour,
         endHour,
         fromCalendar,
+        manualCells,
         audience,
         ...(parsePlace(req.body.place) || {}),
       },
@@ -512,7 +528,7 @@ async function confirmInvite(req, res) {
     if (openCells) {
       for (let h = Math.floor(startMin / 60); h * 60 < endMin; h++) {
         if (!openCells.has(`${date}|${pad2(h)}`)) {
-          return res.status(409).json({ message: '캘린더에서 닫은 시간이 들어 있어요. 예약 가능으로 열려 있는 시간으로 골라주세요.' });
+          return res.status(409).json({ message: poll.fromCalendar ? '캘린더에서 닫은 시간이 들어 있어요. 예약 가능으로 열려 있는 시간으로 골라주세요.' : '링크에 열어둔 시간으로만 확정할 수 있어요.' });
         }
       }
     }

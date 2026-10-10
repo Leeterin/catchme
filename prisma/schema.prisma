@@ -387,6 +387,7 @@ model InvitePoll {
   startHour      Int // 하루 중 고를 수 있는 시작 시각 (0~23)
   endHour        Int // 끝 시각 (1~24, 이 시각 직전 칸까지)
   fromCalendar   Boolean      @default(false) // true면 만든 사람 캘린더의 "예약 가능" 시간 칸만 고를 수 있음 (캘린더가 바뀌면 바로 반영)
+  manualCells    String[]     @default([]) // 직접 고르기 링크에서 날짜마다 따로 연 1시간 칸 "YYYY-MM-DD|HH" - 링크에만 저장 (비어 있으면 startHour~endHour 전부)
   audience       String       @default("friends") // "friends" | "work" - 캘린더 기준 링크에서 어떤 예약 가능 시간을 보여줄지 (모두 + 친구만 / 모두 + 일만)
   // 추천 게시물 등에서 "약속 장소로 선택"해서 만든 링크면 장소가 같이 붙음 (없으면 null)
   placeName      String?
