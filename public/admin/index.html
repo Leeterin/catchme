@@ -116,6 +116,8 @@
   .badge.pending{ background:#fffbeb; color:var(--warn); }
   .badge.cancelled{ background:var(--danger-bg); color:var(--danger); }
   .badge.action{ background:#eff6ff; color:var(--accent); }
+  .badge.reviewed{ background:#ecfdf5; color:var(--ok); }
+  .badge.dismissed{ background:var(--bg); color:var(--text-dim); }
   .row-actions{ display:flex; gap:6px; flex-shrink:0; flex-wrap:wrap; justify-content:flex-end; }
   .row-actions button{ padding:6px 10px; border-radius:8px; border:1px solid var(--line); background:#fff; font-size:12px; font-weight:600; }
   .row-actions button.danger{ color:var(--danger); border-color:#fecaca; }
@@ -249,6 +251,12 @@
           <option value="PENDING">대기중</option>
           <option value="REVIEWED">처리됨</option>
           <option value="DISMISSED">반려됨</option>
+          <option value="DONE">처리됨 + 반려됨</option>
+          <option value="ALL">전체</option>
+        </select>
+        <select id="reportSortSelect">
+          <option value="latest">최신순</option>
+          <option value="oldest">등록순 (오래된 것부터)</option>
         </select>
         <button id="reportRefreshBtn">새로고침</button>
       </div>

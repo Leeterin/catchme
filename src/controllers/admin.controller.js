@@ -197,16 +197,24 @@ async function resolveTargetPreview(report) {
   return { exists: false };
 }
 
-// GET /api/admin/reports?status=PENDING&page=&limit=
+// GET /api/admin/reports?status=PENDING&sort=latest&page=&limit=
+// status: PENDING/REVIEWED/DISMISSED 하나, DONE(처리됨+반려됨), ALL(전체)
+// sort: latest(최신순, 기본) / oldest(등록순 - 먼저 들어온 신고부터)
 async function listReports(req, res) {
-  const status = ['PENDING', 'REVIEWED', 'DISMISSED'].includes(req.query.status) ? req.query.status : 'PENDING';
+  const STATUS_FILTER = {
+    PENDING: 'PENDING', REVIEWED: 'REVIEWED', DISMISSED: 'DISMISSED',
+    DONE: { in: ['REVIEWED', 'DISMISSED'] }, ALL: null,
+  };
+  const statusKey = Object.prototype.hasOwnProperty.call(STATUS_FILTER, req.query.status) ? req.query.status : 'PENDING';
+  const where = STATUS_FILTER[statusKey] ? { status: STATUS_FILTER[statusKey] } : {};
+  const sortDir = req.query.sort === 'oldest' ? 'asc' : 'desc';
   const page = Math.max(parseInt(req.query.page, 10) || 1, 1);
   const limit = Math.min(Math.max(parseInt(req.query.limit, 10) || 30, 1), 100);
 
   const [reports, total] = await Promise.all([
     prisma.report.findMany({
-      where: { status },
-      orderBy: { createdAt: 'desc' },
+      where,
+      orderBy: [{ createdAt: sortDir }, { id: sortDir }],
       skip: (page - 1) * limit,
       take: limit,
       // 첨부 사진(images)은 용량이 커서 목록에선 빼고 상세보기에서만 내려줌
@@ -215,7 +223,7 @@ async function listReports(req, res) {
         reporter: { select: { id: true, username: true, name: true } },
       },
     }),
-    prisma.report.count({ where: { status } }),
+    prisma.report.count({ where }),
   ]);
 
   const withTargets = await Promise.all(reports.map(async (r) => ({

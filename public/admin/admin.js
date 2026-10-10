@@ -603,8 +603,9 @@
     const listEl = document.getElementById('reportList');
     listEl.innerHTML = '<div class="empty-state">불러오는 중...</div>';
     const status = document.getElementById('reportStatusSelect').value;
+    const sort = document.getElementById('reportSortSelect').value;
     try {
-      const data = await apiRequest(`/admin/reports?page=${reportPage}&status=${status}`);
+      const data = await apiRequest(`/admin/reports?page=${reportPage}&status=${status}&sort=${sort}`);
       if(data.reports.length === 0){
         listEl.innerHTML = '<div class="empty-state">해당하는 신고가 없어요.</div>';
       } else {
@@ -613,7 +614,7 @@
             <div class="row-main">
               <div class="row-title">
                 [${TARGET_TYPE_LABEL[r.targetType] || r.targetType}] ${escapeHtml(r.target.exists ? r.target.title : '(이미 삭제된 콘텐츠)')}
-                ${r.status === 'PENDING' ? '<span class="badge pending">대기중</span>' : ''}
+                <span class="badge ${r.status.toLowerCase()}">${REPORT_STATUS_LABEL[r.status] || r.status}</span>
               </div>
               <div class="row-sub">사유: ${escapeHtml(r.reason)}${r.detail ? ` — ${escapeHtml(r.targetType === 'BUG' ? r.detail.split('\n')[0].slice(0, 80) : r.detail)}` : ''}</div>
               <div class="row-sub">
@@ -766,6 +767,7 @@
 
   document.getElementById('reportRefreshBtn').addEventListener('click', () => loadReports(reportPage));
   document.getElementById('reportStatusSelect').addEventListener('change', () => loadReports(1));
+  document.getElementById('reportSortSelect').addEventListener('change', () => loadReports(1));
 
   // ---------- 소식 관리 ----------
   let feedPage = 1;
