@@ -424,6 +424,7 @@ async function listChatRooms(req, res) {
     FROM messages m
     JOIN chat_room_members crm ON crm."chatRoomId" = m."chatRoomId" AND crm."userId" = ${req.userId}
     WHERE m."createdAt" > crm."lastReadAt" AND m."senderId" <> ${req.userId}
+      AND COALESCE(m."text", '') NOT LIKE '⟦sys|%'
     GROUP BY m."chatRoomId"`;
   const unreadByRoom = new Map(unreadRows.map((r) => [r.roomId, r.count]));
   await attachAvatarFlags(memberships.flatMap((m) => m.chatRoom.members.map((mem) => mem.user)));
@@ -1769,12 +1770,15 @@ async function createGroupRoom(req, res) {
 
 // POST /api/chats/:roomId/leave
 // 채팅방에서 나감 (내 멤버십만 삭제, 남은 멤버가 없으면 방 자체도 정리)
+// 그룹방이면 남은 사람들에게 "OO님이 나갔어요"를 남기고 실시간으로 알려서 멤버 목록에서도 바로 빠지게 함
 async function leaveRoom(req, res) {
   const { roomId } = req.params;
 
   if (!(await assertMembership(roomId, req.userId))) {
     return res.status(403).json({ message: '이 채팅방에 속해있지 않아요.' });
   }
+
+  const room = await prisma.chatRoom.findUnique({ where: { id: roomId }, select: { isGroup: true } });
 
   await prisma.chatRoomMember.delete({
     where: { chatRoomId_userId: { chatRoomId: roomId, userId: req.userId } },
@@ -1783,9 +1787,90 @@ async function leaveRoom(req, res) {
   const remaining = await prisma.chatRoomMember.count({ where: { chatRoomId: roomId } });
   if (remaining === 0) {
     await prisma.chatRoom.delete({ where: { id: roomId } });
+  } else if (room && room.isGroup) {
+    const me = await prisma.user.findUnique({ where: { id: req.userId }, select: { id: true, username: true, name: true } });
+    const notice = await prisma.message.create({
+      data: { chatRoomId: roomId, senderId: req.userId, type: 'TEXT', text: sysLeaveText(me) },
+    });
+    await notifyRoom(roomId, req.userId, 'newMessage', { roomId, message: serializeMessage(notice) });
   }
 
   return res.json({ message: '채팅방을 나갔어요.' });
+}
+
+// 그룹방 안내 문구(누가 나갔어요 / 누가 초대했어요) - DB 칸을 늘리지 않으려고 일정 공유(⟦cal|...⟧)처럼
+// 일반 TEXT 메시지 맨 앞에 ⟦sys|...⟧ 머리말을 붙여 저장하고, 화면에서는 가운데 작은 안내줄로 그림
+//   ⟦sys|leave|나간사람id|아이디|이름⟧
+//   ⟦sys|invite|초대한사람id|이름|id,아이디,이름;id,아이디,이름⟧
+function encSys(v) {
+  return encodeURIComponent(v || '');
+}
+function sysLeaveText(user) {
+  return `⟦sys|leave|${user.id}|${encSys(user.username)}|${encSys(user.name)}⟧`;
+}
+function sysInviteText(inviter, invited) {
+  const list = invited.map((u) => [u.id, encSys(u.username), encSys(u.name)].join(',')).join(';');
+  return `⟦sys|invite|${inviter.id}|${encSys(inviter.name)}|${list}⟧`;
+}
+
+// POST /api/chats/:roomId/members   body: { usernames: [...] }
+// 이미 있는 그룹방에 친구를 추가로 초대 (나간 사람 다시 초대도 같은 방법)
+async function addRoomMembers(req, res) {
+  const { roomId } = req.params;
+  const { usernames } = req.body;
+
+  const room = await prisma.chatRoom.findUnique({ where: { id: roomId }, include: { members: true } });
+  if (!room || !room.members.some((m) => m.userId === req.userId)) {
+    return res.status(403).json({ message: '이 채팅방에 속해있지 않아요.' });
+  }
+  if (!room.isGroup) {
+    return res.status(400).json({ message: '그룹 채팅방에만 초대할 수 있어요.' });
+  }
+  if (!Array.isArray(usernames) || usernames.length === 0) {
+    return res.status(400).json({ message: '초대할 친구를 한 명 이상 선택해주세요.' });
+  }
+
+  const normalized = [...new Set(usernames.map((u) => String(u).trim().toLowerCase()))];
+  const users = await prisma.user.findMany({
+    where: { username: { in: normalized } },
+    select: { id: true, username: true, name: true },
+  });
+  if (users.length !== normalized.length) {
+    return res.status(404).json({ message: '일부 사용자를 찾을 수 없어요.' });
+  }
+
+  const existing = new Set(room.members.map((m) => m.userId));
+  const toAdd = users.filter((u) => !existing.has(u.id));
+  if (toAdd.length === 0) {
+    return res.status(400).json({ message: '이미 채팅방에 있는 친구예요.' });
+  }
+  for (const user of toAdd) {
+    // eslint-disable-next-line no-await-in-loop
+    if (!(await areFriends(req.userId, user.id))) {
+      return res.status(403).json({ message: `${user.name}님과는 친구가 아니라 초대할 수 없어요.` });
+    }
+  }
+
+  const inviter = await prisma.user.findUnique({ where: { id: req.userId }, select: { id: true, name: true } });
+  const notice = await prisma.$transaction(async (tx) => {
+    await tx.chatRoomMember.createMany({
+      data: toAdd.map((u) => ({ chatRoomId: roomId, userId: u.id })),
+      skipDuplicates: true,
+    });
+    return tx.message.create({
+      data: { chatRoomId: roomId, senderId: req.userId, type: 'TEXT', text: sysInviteText(inviter, toAdd) },
+    });
+  });
+
+  // 새로 들어온 사람은 아직 이 방을 모르니, newMessage를 받으면 방 목록부터 새로 불러옴
+  await notifyRoom(roomId, req.userId, 'newMessage', { roomId, message: serializeMessage(notice) });
+  pushInBackground(toAdd.map((u) => u.id), {
+    title: room.name || '그룹 채팅',
+    body: `${inviter.name}님이 채팅방에 초대했어요.`,
+    data: { type: 'chat', roomId },
+  });
+
+  return res.status(201).json({ message: serializeMessage(notice) });
 }
 
 // DELETE /api/chats/:roomId — 채팅방을 모든 멤버에게서 지움 (메시지·고정 일정도 같이 지워짐)
@@ -2311,6 +2396,7 @@ module.exports = {
   voteLocationSuggest,
   fixLocationSuggest,
   createGroupRoom,
+  addRoomMembers,
   leaveRoom,
   deleteRoom,
   deleteMessage,
