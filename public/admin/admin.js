@@ -621,6 +621,7 @@
                 신고자 @${escapeHtml(r.reporter.username)}
                 ${r.target.author ? ` · 대상 @${escapeHtml(r.target.author.username)}` : ''}
                 · ${fmtDate(r.createdAt)}
+                ${r.handledAt && r.status !== 'PENDING' ? ` · 처리 ${fmtDate(r.handledAt)}` : ''}
               </div>
             </div>
             <div class="row-actions">

@@ -199,7 +199,7 @@ async function resolveTargetPreview(report) {
 
 // GET /api/admin/reports?status=PENDING&sort=latest&page=&limit=
 // status: PENDING/REVIEWED/DISMISSED 하나, DONE(처리됨+반려됨), ALL(전체)
-// sort: latest(최신순, 기본) / oldest(등록순 - 먼저 들어온 신고부터)
+// sort: latest(최신순 - 최근에 처리한 신고부터, 기본) / oldest(등록순 - 먼저 들어온 신고부터)
 async function listReports(req, res) {
   const STATUS_FILTER = {
     PENDING: 'PENDING', REVIEWED: 'REVIEWED', DISMISSED: 'DISMISSED',
@@ -211,20 +211,44 @@ async function listReports(req, res) {
   const page = Math.max(parseInt(req.query.page, 10) || 1, 1);
   const limit = Math.min(Math.max(parseInt(req.query.limit, 10) || 30, 1), 100);
 
-  const [reports, total] = await Promise.all([
-    prisma.report.findMany({
-      where,
-      orderBy: [{ createdAt: sortDir }, { id: sortDir }],
-      skip: (page - 1) * limit,
-      take: limit,
-      // 첨부 사진(images)은 용량이 커서 목록에선 빼고 상세보기에서만 내려줌
-      select: {
-        id: true, targetType: true, targetId: true, reason: true, detail: true, status: true, createdAt: true,
-        reporter: { select: { id: true, username: true, name: true } },
-      },
-    }),
-    prisma.report.count({ where }),
-  ]);
+  // 첨부 사진(images)은 용량이 커서 목록에선 빼고 상세보기에서만 내려줌
+  const LIST_SELECT = {
+    id: true, targetType: true, targetId: true, reason: true, detail: true, status: true, createdAt: true,
+    reporter: { select: { id: true, username: true, name: true } },
+  };
+
+  // 신고별 마지막 처리 시간 - 관리자 행동 기록(RESOLVE_REPORT)에서 가져옴. 처리한 적 없으면 없음
+  const handledRows = await prisma.adminActionLog.groupBy({
+    by: ['targetId'],
+    where: { action: 'RESOLVE_REPORT', targetType: 'REPORT' },
+    _max: { createdAt: true },
+  });
+  const handledAtById = new Map(handledRows.map((h) => [h.targetId, h._max.createdAt]));
+
+  let reports;
+  let total;
+  if (sortDir === 'desc') {
+    // 최신순: 최근에 처리(처리됨/반려됨/상태 변경)한 신고부터. 처리 안 한 신고는 들어온 시간 기준
+    const all = await prisma.report.findMany({ where, select: { id: true, createdAt: true } });
+    const key = (r) => (handledAtById.get(r.id) || r.createdAt).getTime();
+    all.sort((a, b) => key(b) - key(a) || (a.id < b.id ? 1 : -1));
+    total = all.length;
+    const pageIds = all.slice((page - 1) * limit, page * limit).map((r) => r.id);
+    const rows = await prisma.report.findMany({ where: { id: { in: pageIds } }, select: LIST_SELECT });
+    const byId = new Map(rows.map((r) => [r.id, r]));
+    reports = pageIds.map((id) => byId.get(id)).filter(Boolean);
+  } else {
+    [reports, total] = await Promise.all([
+      prisma.report.findMany({
+        where,
+        orderBy: [{ createdAt: 'asc' }, { id: 'asc' }],
+        skip: (page - 1) * limit,
+        take: limit,
+        select: LIST_SELECT,
+      }),
+      prisma.report.count({ where }),
+    ]);
+  }
 
   const withTargets = await Promise.all(reports.map(async (r) => ({
     id: r.id,
@@ -234,6 +258,7 @@ async function listReports(req, res) {
     detail: r.detail,
     status: r.status,
     createdAt: r.createdAt,
+    handledAt: handledAtById.get(r.id) || null,
     reporter: r.reporter,
     target: await resolveTargetPreview(r),
   })));
