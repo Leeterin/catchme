@@ -408,7 +408,7 @@ async function listMyInvites(req, res) {
 async function getInvite(req, res) {
   try {
     const poll = await findPollByToken(req.params.token);
-    if (!poll) return res.status(404).json({ message: '초대 링크를 찾을 수 없어요.' });
+    if (!poll) return res.status(404).json({ message: '삭제됐거나 없는 약속 링크예요.' });
     const guestKey = typeof req.query.guestKey === 'string' ? req.query.guestKey.slice(0, 64) : null;
     res.json({ invite: serializePoll(poll, { userId: req.userId, guestKey, openCells: await openCellsForPoll(poll) }) });
   } catch (err) {
@@ -422,7 +422,7 @@ async function getInvite(req, res) {
 async function respondInvite(req, res) {
   try {
     const poll = await findPollByToken(req.params.token);
-    if (!poll) return res.status(404).json({ message: '초대 링크를 찾을 수 없어요.' });
+    if (!poll) return res.status(404).json({ message: '삭제됐거나 없는 약속 링크예요.' });
     if (poll.status !== 'OPEN') {
       return res.status(409).json({ message: poll.status === 'CONFIRMED' ? '이미 시간이 확정된 약속이에요.' : '취소된 약속이에요.' });
     }
@@ -492,7 +492,7 @@ async function respondInvite(req, res) {
 async function confirmInvite(req, res) {
   try {
     const poll = await findPollByToken(req.params.token);
-    if (!poll) return res.status(404).json({ message: '초대 링크를 찾을 수 없어요.' });
+    if (!poll) return res.status(404).json({ message: '삭제됐거나 없는 약속 링크예요.' });
     if (poll.creatorId !== req.userId) return res.status(403).json({ message: '약속을 만든 사람만 확정할 수 있어요.' });
     if (poll.status !== 'OPEN') return res.status(409).json({ message: '이미 확정됐거나 취소된 약속이에요.' });
 
@@ -505,6 +505,16 @@ async function confirmInvite(req, res) {
     if (!poll.dates.includes(date)) return res.status(400).json({ message: '후보에 없는 날짜예요.' });
     if (!(startMin % 5 === 0 && endMin % 5 === 0 && startMin >= poll.startHour * 60 && endMin <= poll.endHour * 60 && startMin < endMin)) {
       return res.status(400).json({ message: '시간 범위가 올바르지 않아요.' });
+    }
+    // 캘린더 기준 링크면 지금도 예약 가능으로 열려 있는 칸으로만 확정 - 친구가 고른 뒤 캘린더에서 닫은 칸은 안 됨
+    // (친구 응답은 지우지 않고 남겨둠 - 다시 열면 그대로 살아남)
+    const openCells = await openCellsForPoll(poll);
+    if (openCells) {
+      for (let h = Math.floor(startMin / 60); h * 60 < endMin; h++) {
+        if (!openCells.has(`${date}|${pad2(h)}`)) {
+          return res.status(409).json({ message: '캘린더에서 닫은 시간이 들어 있어요. 예약 가능으로 열려 있는 시간으로 골라주세요.' });
+        }
+      }
     }
 
     const confirmedStart = kstDate(date, startMin / 60);
@@ -553,7 +563,7 @@ async function confirmInvite(req, res) {
 async function cancelInvite(req, res) {
   try {
     const poll = await findPollByToken(req.params.token);
-    if (!poll) return res.status(404).json({ message: '초대 링크를 찾을 수 없어요.' });
+    if (!poll) return res.status(404).json({ message: '삭제됐거나 없는 약속 링크예요.' });
     if (poll.creatorId !== req.userId) return res.status(403).json({ message: '약속을 만든 사람만 취소할 수 있어요.' });
     if (poll.status === 'CANCELLED') return res.status(409).json({ message: '이미 취소된 약속이에요.' });
 
@@ -600,12 +610,31 @@ async function cancelInvite(req, res) {
   }
 }
 
+// DELETE /api/invites/:token  (만든 사람만) - 목록에서 아예 지움 (친구 응답도 같이 지워지고, 링크를 열면 "없는 링크"로 나옴)
+// 아직 시작 전인 확정 약속은 다른 사람 캘린더에도 들어가 있어서, 먼저 취소(모두의 캘린더에서 지우고 알림)한 뒤에 지울 수 있음.
+// 이미 지난 확정 약속을 지워도 캘린더에 담긴 일정은 기록으로 남음
+async function deleteInvite(req, res) {
+  try {
+    const poll = await findPollByToken(req.params.token);
+    if (!poll) return res.status(404).json({ message: '이미 삭제된 약속이에요.' });
+    if (poll.creatorId !== req.userId) return res.status(403).json({ message: '약속을 만든 사람만 삭제할 수 있어요.' });
+    if (poll.status === 'CONFIRMED' && poll.confirmedStart && poll.confirmedStart.getTime() > Date.now()) {
+      return res.status(409).json({ message: '다가오는 확정 약속은 먼저 취소한 뒤에 삭제할 수 있어요.' });
+    }
+    await prisma.invitePoll.delete({ where: { id: poll.id } });
+    res.json({ ok: true });
+  } catch (err) {
+    console.error('[deleteInvite]', err);
+    res.status(500).json({ message: '약속을 삭제하지 못했어요.' });
+  }
+}
+
 // POST /api/invites/:token/claim  { guestKey }  (로그인 필요)
 // 비회원으로 응답했던 사람이 가입/로그인한 뒤, 그 응답을 내 계정에 연결하고 확정된 약속을 내 캘린더에 넣음
 async function claimInvite(req, res) {
   try {
     const poll = await findPollByToken(req.params.token);
-    if (!poll) return res.status(404).json({ message: '초대 링크를 찾을 수 없어요.' });
+    if (!poll) return res.status(404).json({ message: '삭제됐거나 없는 약속 링크예요.' });
     const guestKey = String(req.body.guestKey || '').slice(0, 64);
     const mine = findMyResponse(poll, { userId: req.userId, guestKey });
     if (!mine) return res.status(404).json({ message: '이 약속에 응답한 기록이 없어요.' });
@@ -770,5 +799,6 @@ module.exports = {
   respondInvite,
   confirmInvite,
   cancelInvite,
+  deleteInvite,
   claimInvite,
 };

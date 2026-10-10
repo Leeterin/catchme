@@ -2,7 +2,7 @@ const express = require('express');
 const { requireAuth, optionalAuth } = require('../middleware/auth.middleware');
 const { inviteLimiter } = require('../middleware/rateLimit.middleware');
 const {
-  myAvailability, createInvite, listMyInvites, getInvite, respondInvite, confirmInvite, cancelInvite, claimInvite,
+  myAvailability, createInvite, listMyInvites, getInvite, respondInvite, confirmInvite, cancelInvite, deleteInvite, claimInvite,
 } = require('../controllers/invites.controller');
 
 const router = express.Router();
@@ -15,6 +15,7 @@ router.get('/:token', optionalAuth, getInvite);
 router.post('/:token/respond', optionalAuth, inviteLimiter, respondInvite);
 router.post('/:token/confirm', requireAuth, confirmInvite);
 router.post('/:token/cancel', requireAuth, cancelInvite);
+router.delete('/:token', requireAuth, deleteInvite);
 router.post('/:token/claim', requireAuth, claimInvite);
 
 module.exports = router;
