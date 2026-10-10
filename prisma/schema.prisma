@@ -261,6 +261,7 @@ model Message {
   locationStatus  ReservationStatus? // 같은 상태값(PENDING/CONFIRMED/DECLINED/WITHDRAWN/CANCELLED)을 재사용
   locationPlaceId String? // 이 장소가 캐치미 장소 DB(Place)의 어느 곳인지 (LOCATION_SUGGEST / LOCATION_NOTICE)
   locationVotes   LocationSuggestVote[] // 장소 후보 투표 (한 방에서 한 사람은 대기 중인 후보 하나에만 투표)
+  locationPinId   String? // 이 장소 제안이 어느 약속(PinnedItem)을 위한 건지 - 비어 있으면 아직 날짜 미정 약속
 
   // IMAGE 메시지일 때 - 사진을 base64로 DB에 직접 저장 (프로필 사진과 같은 방식)
   imageUrl String?
@@ -503,6 +504,7 @@ model PinnedItem {
   locationLat     Float?
   locationLon     Float?
   sourceMessageId String?
+  forPinId        String? // 장소만 있는 핀일 때 어느 약속(PinnedItem)의 장소인지 - 비어 있으면 날짜 미정 약속 / 예전 데이터
   createdAt       DateTime @default(now())
 
   @@index([chatRoomId])

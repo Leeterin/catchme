@@ -105,6 +105,7 @@ function serializeMessage(message) {
         locationLat: message.locationLat,
         locationLon: message.locationLon,
         placeId: message.locationPlaceId || null,
+        pinId: message.locationPinId || null,
         status: message.locationStatus,
         voterIds: (message.locationVotes || []).map((v) => v.userId),
       },
@@ -1031,6 +1032,18 @@ async function restoreAvailabilityChoice(req, res) {
 // 장소 제안 하나를 확정 - 이 방의 약속 장소 목록에 다음 장소(1차 → 2차 → ...)로 추가하고, 같은 방에서 아직
 // 대기 중이던 다른 후보들은 마감(DECLINED) 처리 (이번 투표 판은 끝남 - 다음 장소는 새로 후보를 올려서 정함).
 // (투표로 정해졌든, 투표 없이 픽스했든, 1:1에서 수락했든 결과는 같음) 반드시 트랜잭션(tx) 안에서 호출
+// 같은 약속을 위한 장소 제안끼리만 묶음 (확정되면 마감, 투표는 한 사람당 하나) - 특정 약속을 위한 제안이면
+// 그 약속 것 + 약속 없이(날짜 미정일 때) 올라온 제안, 약속 없이 올린 제안이면 같은 것끼리
+function locationGroupWhere(pinId) {
+  return pinId ? { OR: [{ locationPinId: pinId }, { locationPinId: null }] } : { locationPinId: null };
+}
+// 같은 약속에 이미 정해진 "장소만 있는 핀" - since 이후에 날짜 미정으로 정한 것도 포함
+// (예전 약속에서 정했던 장소 때문에 같은 곳을 다시 못 고르는 일이 없게)
+function placePinGroupWhere(pinId, since) {
+  const undated = { forPinId: null, createdAt: { gt: since } };
+  return pinId ? { OR: [{ forPinId: pinId }, undated] } : undated;
+}
+
 async function confirmLocationSuggestionTx(tx, message) {
   await tx.message.update({ where: { id: message.id }, data: { locationStatus: 'CONFIRMED' } });
   // 예전엔 "장소만" 고정한 핀을 지우고 새로 하나만 남겼는데, 이제는 밥 먹고 카페 가는 것처럼 장소를 여러 개
@@ -1042,8 +1055,13 @@ async function confirmLocationSuggestionTx(tx, message) {
     locationLon: message.locationLon,
   };
   // 이미 같은 장소가 정해져 있으면 또 쌓지 않음
+  const pinId = message.locationPinId || null;
   const samePlacePin = await tx.pinnedItem.findFirst({
-    where: { chatRoomId: message.chatRoomId, location: { equals: message.locationPlace, mode: 'insensitive' } },
+    where: {
+      chatRoomId: message.chatRoomId,
+      location: { equals: message.locationPlace, mode: 'insensitive' },
+      AND: [{ OR: [...(pinId ? [{ id: pinId }] : []), placePinGroupWhere(pinId, message.createdAt)] }],
+    },
     select: { id: true },
   });
   if (!samePlacePin) {
@@ -1053,20 +1071,29 @@ async function confirmLocationSuggestionTx(tx, message) {
         note: message.locationNote,
         ...placeData,
         sourceMessageId: message.id,
+        forPinId: pinId,
       },
     });
   }
-  // 상단 고정 카드(확정된 일정)에 아직 장소가 없으면 첫 장소(1차)로 채워둠 (이미 장소가 있는 일정은 그대로)
-  await tx.pinnedItem.updateMany({
-    where: {
-      chatRoomId: message.chatRoomId,
-      dateLabel: { not: null },
-      OR: [{ location: null }, { location: '' }],
-    },
-    data: placeData,
-  });
+  // 이 제안이 위한 약속 카드에 아직 장소가 없으면 첫 장소(1차)로 채워둠 (이미 장소가 있으면 그대로).
+  // 예전엔 방의 모든 일정 카드에 채워서 지난 약속에도 새 장소가 들어갔음
+  if (pinId) {
+    await tx.pinnedItem.updateMany({
+      where: {
+        id: pinId,
+        chatRoomId: message.chatRoomId,
+        dateLabel: { not: null },
+        OR: [{ location: null }, { location: '' }],
+      },
+      data: placeData,
+    });
+  }
+  // 같은 약속의 다른 후보만 마감 (다른 약속을 위한 후보는 그대로 투표 중)
   await tx.message.updateMany({
-    where: { chatRoomId: message.chatRoomId, type: 'LOCATION_SUGGEST', locationStatus: 'PENDING', id: { not: message.id } },
+    where: {
+      chatRoomId: message.chatRoomId, type: 'LOCATION_SUGGEST', locationStatus: 'PENDING', id: { not: message.id },
+      ...locationGroupWhere(pinId),
+    },
     data: { locationStatus: 'DECLINED' },
   });
 }
@@ -1137,8 +1164,10 @@ async function pendingLocationSuggestIds(chatRoomId) {
   return rows.map((r) => r.id);
 }
 
-// POST /api/chats/:roomId/location-suggestions   body: { place, note?, location?, locationLat?, locationLon?, immediate? }
+// POST /api/chats/:roomId/location-suggestions   body: { place, note?, location?, locationLat?, locationLon?, immediate?, pinId?, cycleStart? }
 // immediate=true면 협의 없이 바로 확정(핀 고정)까지 함 (기존 "바로 이 장소로 확정" 기능)
+// pinId: 어느 약속(상단 고정 카드)을 위한 제안인지 (없으면 날짜 미정 약속)
+// cycleStart: 이 방에서 마지막으로 끝난 약속이 끝난 시각(ms) - 그 전에 올라온 제안/장소는 지난 약속 것이라 중복 검사에서 뺌
 async function sendLocationSuggest(req, res) {
   const { roomId } = req.params;
   const { place, note, location, locationLat, locationLon, immediate } = req.body;
@@ -1152,14 +1181,21 @@ async function sendLocationSuggest(req, res) {
   }
 
   const trimmedPlace = place.trim();
+  const targetPin = typeof req.body.pinId === 'string' && req.body.pinId
+    ? await prisma.pinnedItem.findFirst({ where: { id: req.body.pinId, chatRoomId: roomId, dateLabel: { not: null } }, select: { id: true } })
+    : null;
+  const pinId = targetPin ? targetPin.id : null;
+  const since = new Date(Number.isFinite(req.body.cycleStart) ? req.body.cycleStart : 0);
 
-  // 아직 답변을 기다리고 있는(PENDING) 같은 장소 제안이 있는지 확인
+  // 아직 답변을 기다리고 있는(PENDING) 같은 장소 제안이 있는지 확인 (같은 약속을 위한 것만)
   const pendingForPlace = await prisma.message.findFirst({
     where: {
       chatRoomId: roomId,
       type: 'LOCATION_SUGGEST',
       locationStatus: 'PENDING',
       locationPlace: { equals: trimmedPlace, mode: 'insensitive' },
+      createdAt: { gt: since },
+      ...locationGroupWhere(pinId),
     },
   });
   // "제안하기"(대답을 기다리는 상태로 새로 보냄)인데 같은 장소가 이미 대기 중이면 중복으로 또 못 보내게 막음.
@@ -1175,6 +1211,7 @@ async function sendLocationSuggest(req, res) {
       chatRoomId: roomId,
       dateLabel: null,
       location: { equals: trimmedPlace, mode: 'insensitive' },
+      ...placePinGroupWhere(pinId, since),
     },
   });
   if (alreadyConfirmedPin) {
@@ -1209,6 +1246,7 @@ async function sendLocationSuggest(req, res) {
       locationLon: lon,
       locationPlaceId: placeRow ? placeRow.id : null,
       locationStatus: immediate ? 'CONFIRMED' : 'PENDING',
+      locationPinId: pinId,
     },
   });
   await recordPlaceEvent(prisma, { placeId: message.locationPlaceId, type: 'SUGGEST', userId: req.userId, chatRoomId: roomId, messageId: message.id });
@@ -1268,7 +1306,7 @@ async function respondToLocationSuggest(req, res, status) {
 }
 
 // POST /api/chats/location-suggestions/:messageId/vote — 장소 후보에 투표(다시 누르면 투표 취소).
-// 한 방에서 한 사람은 대기 중인 후보 하나에만 투표하고, 방 사람 모두 투표했는데 1등이 하나면 그 장소로 자동 확정
+// 한 사람은 같은 약속의 대기 중인 후보 하나에만 투표하고, 방 사람 모두 투표했는데 1등이 하나면 그 장소로 자동 확정
 async function voteLocationSuggest(req, res) {
   const { messageId } = req.params;
   const message = await prisma.message.findUnique({ where: { id: messageId } });
@@ -1292,7 +1330,7 @@ async function voteLocationSuggest(req, res) {
   } else {
     await prisma.$transaction([
       prisma.locationSuggestVote.deleteMany({
-        where: { userId: req.userId, message: { chatRoomId: roomId, type: 'LOCATION_SUGGEST', locationStatus: 'PENDING' } },
+        where: { userId: req.userId, message: { chatRoomId: roomId, type: 'LOCATION_SUGGEST', locationStatus: 'PENDING', ...locationGroupWhere(message.locationPinId) } },
       }),
       prisma.locationSuggestVote.create({ data: { messageId, userId: req.userId } }),
     ]);
@@ -1301,7 +1339,7 @@ async function voteLocationSuggest(req, res) {
     const [memberCount, votes] = await Promise.all([
       prisma.chatRoomMember.count({ where: { chatRoomId: roomId } }),
       prisma.locationSuggestVote.findMany({
-        where: { message: { chatRoomId: roomId, type: 'LOCATION_SUGGEST', locationStatus: 'PENDING' } },
+        where: { message: { chatRoomId: roomId, type: 'LOCATION_SUGGEST', locationStatus: 'PENDING', ...locationGroupWhere(message.locationPinId) } },
         select: { messageId: true, userId: true },
       }),
     ]);
