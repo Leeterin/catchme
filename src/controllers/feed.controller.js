@@ -116,8 +116,8 @@ function serializePost(post, myUserId, req) {
     likeCount: post._count ? post._count.likes : likes.length,
     commentCount: post._count ? post._count.comments : (post.comments ? post.comments.length : undefined),
     likedByMe: myUserId ? likes.some((l) => l.userId === myUserId) : false,
-    // 목록 조회(saves를 내 것만 골라 읽음)에서만 들어감 - 수정/작성 응답엔 없어서 프론트의 기존 값을 덮어쓰지 않음
-    ...(post.saves ? { savedByMe: post.saves.length > 0 } : {}),
+    // 이 리뷰의 장소를 내가 저장했는지 - 목록 조회에서만 들어감 (수정/작성 응답엔 없어서 프론트의 기존 값을 덮어쓰지 않음)
+    ...(typeof post.savedByMe === 'boolean' ? { savedByMe: post.savedByMe } : {}),
     createdAt: post.createdAt,
   };
 }
@@ -188,19 +188,24 @@ async function listFeedPosts(req, res) {
 
   // 예전엔 모든 게시물의 사진 원본(최대 5장)과 작성자 프로필 사진 원본까지 서버로 다 읽어왔다가 버렸음 -
   // 글이 쌓이면 서버 메모리가 모자랄 수 있어서, 사진은 빼고 읽고 필요한 값(사진 해시, 프로필 사진 유무)만 DB에서 계산해옴
-  let posts = await prisma.feedPost.findMany({
-    where,
-    select: {
-      ...FEED_POST_FIELDS_WITHOUT_PHOTOS,
-      author: { select: { id: true, username: true, name: true, reviewNickname: true } },
-      place: { select: { name: true, category: true, location: true, lat: true, lon: true } },
-      likes: { select: { userId: true } },
-      saves: { where: { userId: req.userId }, select: { id: true } },
-      comments: { select: { rating: true } },
-      _count: { select: { likes: true, comments: true } },
-    },
-    orderBy: { createdAt: 'desc' },
-  });
+  const [found, mySaves] = await Promise.all([
+    prisma.feedPost.findMany({
+      where,
+      select: {
+        ...FEED_POST_FIELDS_WITHOUT_PHOTOS,
+        author: { select: { id: true, username: true, name: true, reviewNickname: true } },
+        place: { select: { name: true, category: true, location: true, lat: true, lon: true } },
+        likes: { select: { userId: true } },
+        comments: { select: { rating: true } },
+        _count: { select: { likes: true, comments: true } },
+      },
+      orderBy: { createdAt: 'desc' },
+    }),
+    prisma.placeSave.findMany({ where: { userId: req.userId }, select: { placeId: true } }),
+  ]);
+  let posts = found;
+  const savedPlaceIds = new Set(mySaves.map((s) => s.placeId));
+  for (const p of posts) p.savedByMe = !!p.placeId && savedPlaceIds.has(p.placeId);
 
   if (hasLocation) {
     // 위치가 없는 게시물(직접 입력만 하고 검색으로 안 고른 경우)은 반경 필터링 대상에서 제외됨
@@ -366,25 +371,37 @@ async function toggleLike(req, res) {
   return res.json({ liked: !existing, likeCount });
 }
 
-// POST /api/feed/:id/save  - 저장(⭐) 토글
+// POST /api/feed/:id/save  - 이 리뷰의 장소를 저장(⭐) 토글 (리뷰가 아니라 장소를 저장함)
 async function toggleSave(req, res) {
   const { id } = req.params;
-  const post = await prisma.feedPost.findUnique({ where: { id }, select: { id: true } });
+  const post = await prisma.feedPost.findUnique({ where: { id } });
   if (!post) return res.status(404).json({ message: '게시물을 찾을 수 없어요.' });
 
-  const existing = await prisma.feedPostSave.findUnique({
-    where: { postId_userId: { postId: id, userId: req.userId } },
+  // 장소에 안 묶인 옛 리뷰면 지금 장소를 찾아(없으면 만들어) 연결함
+  let placeId = post.placeId;
+  if (!placeId) {
+    const place = await safeFindOrCreatePlace(prisma, {
+      name: post.title, lat: post.lat, lon: post.lon, address: post.address, phone: post.phone,
+      location: post.location, category: post.category || 'etc',
+    });
+    if (!place) return res.status(400).json({ message: '이 장소는 저장할 수 없어요.' });
+    placeId = place.id;
+    await prisma.feedPost.update({ where: { id }, data: { placeId } });
+  }
+
+  const existing = await prisma.placeSave.findUnique({
+    where: { placeId_userId: { placeId, userId: req.userId } },
   });
   if (existing) {
-    await prisma.feedPostSave.delete({ where: { id: existing.id } });
+    await prisma.placeSave.delete({ where: { id: existing.id } });
   } else {
     try {
-      await prisma.feedPostSave.create({ data: { postId: id, userId: req.userId } });
+      await prisma.placeSave.create({ data: { placeId, userId: req.userId } });
     } catch (err) {
       if (err.code !== 'P2002') throw err; // 거의 동시에 두 번 눌린 경우 - 조용히 무시
     }
   }
-  return res.json({ saved: !existing });
+  return res.json({ saved: !existing, placeId });
 }
 
 // GET /api/feed/:id/comments  - 한 게시물의 댓글 목록

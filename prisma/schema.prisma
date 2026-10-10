@@ -70,6 +70,7 @@ model User {
   feedPosts      FeedPost[]
   feedPostLikes    FeedPostLike[]
   feedPostSaves    FeedPostSave[]
+  placeSaves       PlaceSave[]
   feedPostComments FeedPostComment[]
   reportsMade      Report[]
   meetupReviews    MeetupReview[]
@@ -612,6 +613,7 @@ model Place {
 
   reviews FeedPost[]
   events  PlaceEvent[]
+  saves   PlaceSave[]
 
   @@index([normName])
   @@map("places")
@@ -632,6 +634,20 @@ model PlaceEvent {
   @@index([placeId, type])
   @@index([createdAt])
   @@map("place_events")
+}
+
+// 장소 저장(⭐ 나중에 가볼 곳) - 리뷰가 아니라 장소를 저장함. 한 사람이 한 장소를 한 번만, 다시 누르면 저장 취소
+model PlaceSave {
+  id        String   @id @default(uuid())
+  placeId   String
+  place     Place    @relation(fields: [placeId], references: [id], onDelete: Cascade)
+  userId    String
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  createdAt DateTime @default(now())
+
+  @@unique([placeId, userId])
+  @@index([userId])
+  @@map("place_saves")
 }
 
 // 소식 게시물 - 각자 올린 글이 독립적인 하나의 게시물로 따로 보임 (더 이상 같은 장소끼리 묶지 않음)
@@ -675,7 +691,7 @@ model FeedPostLike {
   @@map("feed_post_likes")
 }
 
-// 리뷰 저장(⭐ 나중에 가볼 곳) - 한 사람이 한 리뷰를 한 번만 저장, 다시 누르면 저장 취소
+// 예전 리뷰 저장 - 이제는 PlaceSave(장소 저장)를 씀. 기존 기록은 place_saves로 옮겨둠
 model FeedPostSave {
   id        String   @id @default(uuid())
   postId    String
