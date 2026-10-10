@@ -282,6 +282,7 @@ function serializeEvent(event) {
       minutes: event.travelMinutes,
       to: { name: event.travelToName, lat: event.travelToLat, lon: event.travelToLon },
       from: event.travelFromName ? { name: event.travelFromName, lat: event.travelFromLat, lon: event.travelFromLon } : null,
+      mode: event.travelMode === 'car' ? 'car' : 'transit',
     } : null,
     note: event.note || null,
     place: event.placeName ? {
@@ -389,12 +390,12 @@ async function sanitizeGroupIds(ownerId, groupIds) {
 // 일정 색상 입력 정리 - "#RRGGBB" 형식만 받고, 빈 값/null은 "색 지정 안 함"(테마 기본 색)으로 취급.
 // 그 외 이상한 값이면 undefined를 돌려줘서 기존 값을 건드리지 않음
 // 이동시간 입력 정리 - null이면 이동시간 지움, undefined면 그대로 둠(수정), 올바르지 않으면 무시
-// travel: { minutes, to: { name, lat, lon }, from?: { name, lat, lon } }
+// travel: { minutes, to: { name, lat, lon }, from?: { name, lat, lon }, mode?: 'car'|'transit' }
 function sanitizeTravel(travel) {
   if (travel === undefined) return undefined;
   const empty = {
     travelMinutes: null, travelToName: null, travelToLat: null, travelToLon: null,
-    travelFromName: null, travelFromLat: null, travelFromLon: null,
+    travelFromName: null, travelFromLat: null, travelFromLon: null, travelMode: null,
   };
   if (travel === null) return empty;
   const minutes = Math.round(Number(travel.minutes));
@@ -411,6 +412,7 @@ function sanitizeTravel(travel) {
     travelFromName: okCoord(from) ? name(from.name) : null,
     travelFromLat: okCoord(from) ? Number(from.lat) : null,
     travelFromLon: okCoord(from) ? Number(from.lon) : null,
+    travelMode: travel.mode === 'car' ? 'car' : 'transit',
   };
 }
 

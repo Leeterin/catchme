@@ -476,6 +476,8 @@ model Event {
   travelFromName String?
   travelFromLat  Float?
   travelFromLon  Float?
+  // 이동 수단 - "car"(자동차) / "transit"(대중교통). null이면 대중교통으로 봄
+  travelMode     String?
 
   // 일정 메모·장소 - 본인 화면용이라 친구 쪽 응답엔 내보내지 않음. 장소 좌표는 지도로 열 때 씀
   note         String?
