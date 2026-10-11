@@ -424,6 +424,7 @@ async function listChatRooms(req, res) {
     FROM messages m
     JOIN chat_room_members crm ON crm."chatRoomId" = m."chatRoomId" AND crm."userId" = ${req.userId}
     WHERE m."createdAt" > crm."lastReadAt" AND m."senderId" <> ${req.userId}
+      AND (crm."clearedAt" IS NULL OR m."createdAt" > crm."clearedAt")
       AND COALESCE(m."text", '') NOT LIKE '⟦sys|%'
     GROUP BY m."chatRoomId"`;
   const unreadByRoom = new Map(unreadRows.map((r) => [r.roomId, r.count]));
@@ -439,6 +440,10 @@ async function listChatRooms(req, res) {
       // 상대방이 언제까지 읽었는지 - 보낸 메시지의 "읽음" 표시에 씀 (상대가 읽음 표시를 껐으면 null)
       const otherLastReadAt = otherMember && !receiptOffIds.has(otherMember.userId) ? otherMember.lastReadAt : null;
       const lastMessage = room.messages[0] || null;
+      // "채팅방 삭제"를 누른 뒤로 새 메시지가 없으면 내 목록에선 숨김 (새 메시지가 오거나, 내가 친구 프로필에서
+      // 1:1 채팅을 다시 열면(lastReadAt이 지운 시각보다 뒤로 감) 다시 나타남)
+      const cleared = membership.clearedAt;
+      if (cleared && membership.lastReadAt <= cleared && (!lastMessage || lastMessage.createdAt <= cleared)) return null;
 
       const unreadCount = unreadByRoom.get(room.id) || 0;
 
@@ -465,9 +470,10 @@ async function listChatRooms(req, res) {
     })
   );
 
-  rooms.sort((a, b) => new Date(b.lastActivityAt) - new Date(a.lastActivityAt));
+  const visibleRooms = rooms.filter(Boolean);
+  visibleRooms.sort((a, b) => new Date(b.lastActivityAt) - new Date(a.lastActivityAt));
 
-  return res.json({ rooms });
+  return res.json({ rooms: visibleRooms });
 }
 
 // POST /api/chats/:roomId/read — 이 방을 지금 읽었다고 표시 (안읽음 개수 0으로)
@@ -544,9 +550,12 @@ async function getOrCreateDirectRoom(req, res) {
   });
 
   if (existing) {
-    const alreadyMember = existing.members.some((m) => m.userId === req.userId);
-    if (!alreadyMember) {
+    const mine = existing.members.find((m) => m.userId === req.userId);
+    if (!mine) {
       await prisma.chatRoomMember.create({ data: { chatRoomId: existing.id, userId: req.userId } });
+    } else if (mine.clearedAt) {
+      // 내가 "채팅방 삭제"했던 방을 다시 열면 목록에 다시 보이게 (예전 대화는 계속 안 보임)
+      await prisma.chatRoomMember.update({ where: { id: mine.id }, data: { lastReadAt: new Date() } });
     }
     return res.json({ roomId: existing.id, created: false });
   }
@@ -585,12 +594,16 @@ async function listMessages(req, res) {
   const { roomId } = req.params;
   const limit = Math.min(parseInt(req.query.limit, 10) || 50, 100);
 
-  if (!(await assertMembership(roomId, req.userId))) {
+  const membership = await prisma.chatRoomMember.findUnique({
+    where: { chatRoomId_userId: { chatRoomId: roomId, userId: req.userId } },
+  });
+  if (!membership) {
     return res.status(403).json({ message: '이 채팅방에 접근할 권한이 없어요.' });
   }
 
   const messages = await prisma.message.findMany({
-    where: { chatRoomId: roomId },
+    // "채팅방 삭제"를 눌렀던 방이면 그 뒤에 온 메시지부터만 보여줌
+    where: { chatRoomId: roomId, ...(membership.clearedAt ? { createdAt: { gt: membership.clearedAt } } : {}) },
     orderBy: { createdAt: 'desc' },
     take: limit,
     select: { ...MESSAGE_FIELDS_WITHOUT_IMAGE, ...PROPOSAL_INCLUDE },
@@ -1873,7 +1886,9 @@ async function addRoomMembers(req, res) {
   return res.status(201).json({ message: serializeMessage(notice) });
 }
 
-// DELETE /api/chats/:roomId — 채팅방을 모든 멤버에게서 지움 (메시지·고정 일정도 같이 지워짐)
+// DELETE /api/chats/:roomId — 채팅방을 "나한테서만" 지움 (카톡처럼)
+// 방과 다른 멤버들의 대화는 그대로 두고, 내 목록에서만 숨기고 지금까지의 대화를 안 보이게 함.
+// 다른 멤버가 계속 메시지를 보낼 수 있고, 새 메시지가 오면 내 목록에 방이 다시 나타나 그 메시지부터 보임
 async function deleteRoom(req, res) {
   const { roomId } = req.params;
 
@@ -1881,12 +1896,11 @@ async function deleteRoom(req, res) {
     return res.status(403).json({ message: '이 채팅방에 속해있지 않아요.' });
   }
 
-  // 지우고 나면 멤버 목록이 없어지니, 알릴 사람을 먼저 구해둠
-  const otherIds = await getOtherMemberIds(roomId, req.userId);
-  await prisma.chatRoom.delete({ where: { id: roomId } });
-
-  const io = getIo();
-  if (io) otherIds.forEach((userId) => io.to(`user:${userId}`).emit('chatRoomDeleted', { roomId }));
+  const now = new Date();
+  await prisma.chatRoomMember.update({
+    where: { chatRoomId_userId: { chatRoomId: roomId, userId: req.userId } },
+    data: { clearedAt: now, lastReadAt: now },
+  });
 
   return res.json({ message: '채팅방을 삭제했어요.' });
 }
