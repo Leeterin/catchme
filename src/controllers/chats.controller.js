@@ -73,6 +73,10 @@ function serializeMessage(message) {
       replyTo: message.replyToMessageId
         ? { msgId: message.replyToMessageId, preview: message.replyToPreview }
         : null,
+      // 날짜 먼저 물어보기("20일 어때요?") 카드 - 날짜는 reservationNote('YYYY-MM-DD'), 답은 reservationStatus에 둠
+      dateAsk: message.reservationNote && message.reservationStatus
+        ? { date: message.reservationNote, status: message.reservationStatus }
+        : null,
     };
   }
 
@@ -1762,6 +1766,93 @@ async function cancelTimeProposal(req, res) {
   return res.json({ message: serializeMessage(updated) });
 }
 
+// ------------------------------------------------------------
+// 날짜 먼저 물어보기 ("20일 어때요?") - 날짜에 좋다고 하면 그다음에 시간·장소를 정함.
+// 메시지 타입을 새로 만들지 않고 TEXT 메시지에 날짜(reservationNote, 'YYYY-MM-DD')와 답(reservationStatus)을 붙여 저장함
+// (예전 버전 앱에는 그냥 "📅 10월 20일(화) 어때요?" 글자로 보임). 일정/핀은 만들지 않음 - 시간이 정해질 때 기존 흐름이 만듦
+// ------------------------------------------------------------
+const DATE_ASK_MAX_DAYS = 365;
+function kstDateKey(date) {
+  const p = toKstParts(date);
+  return `${p.year}-${String(p.month).padStart(2, '0')}-${String(p.day).padStart(2, '0')}`;
+}
+function dateAskLabel(dateKey) {
+  const [y, m, d] = dateKey.split('-').map(Number);
+  return `${m}월 ${d}일(${WEEKDAY_KO[new Date(Date.UTC(y, m - 1, d)).getUTCDay()]})`;
+}
+
+// POST /api/chats/:roomId/date-asks   body: { date: 'YYYY-MM-DD' }
+async function sendDateAsk(req, res) {
+  const { roomId } = req.params;
+  const { date } = req.body || {};
+  const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(typeof date === 'string' ? date : '');
+  const parsed = m ? new Date(Date.UTC(+m[1], +m[2] - 1, +m[3])) : null;
+  if (!parsed || kstDateKey(new Date(parsed.getTime() - 9 * 60 * 60 * 1000)) !== date) {
+    return res.status(400).json({ message: '날짜 형식이 올바르지 않아요.' });
+  }
+  const todayKey = kstDateKey(new Date());
+  const lastKey = kstDateKey(new Date(Date.now() + DATE_ASK_MAX_DAYS * 24 * 60 * 60 * 1000));
+  if (date < todayKey) return res.status(400).json({ message: '이미 지난 날짜는 물어볼 수 없어요.' });
+  if (date > lastKey) return res.status(400).json({ message: '1년 안의 날짜만 물어볼 수 있어요.' });
+  const canMessage = await assertCanMessage(roomId, req.userId);
+  if (!canMessage.ok) {
+    return res.status(canMessage.statusCode).json({ message: canMessage.message });
+  }
+
+  const message = await prisma.message.create({
+    data: {
+      chatRoomId: roomId,
+      senderId: req.userId,
+      type: 'TEXT',
+      text: `📅 ${dateAskLabel(date)} 어때요?`,
+      reservationNote: date,
+      reservationStatus: 'PENDING',
+    },
+  });
+
+  await notifyRoom(roomId, req.userId, 'newMessage', { roomId, message: serializeMessage(message) });
+  pushToRoom(roomId, req.userId, message.text);
+  return res.status(201).json({ message: serializeMessage(message) });
+}
+
+// POST /api/chats/date-asks/:messageId/respond   body: { action: 'accept' | 'decline' | 'withdraw' }
+// 받은 사람은 좋아요(accept)/다른 날(decline), 보낸 사람은 취소(withdraw). 그룹방은 한 명이라도 좋다고 하면 그 날로 정함
+async function respondDateAsk(req, res) {
+  const { messageId } = req.params;
+  const { action } = req.body || {};
+  const nextStatus = { accept: 'CONFIRMED', decline: 'DECLINED', withdraw: 'WITHDRAWN' }[action];
+  if (!nextStatus) return res.status(400).json({ message: '답이 올바르지 않아요.' });
+
+  const message = await prisma.message.findUnique({ where: { id: messageId } });
+  if (!message || message.type !== 'TEXT' || !message.reservationNote || !message.reservationStatus) {
+    return res.status(404).json({ message: '날짜 제안을 찾을 수 없어요.' });
+  }
+  if (!(await assertMembership(message.chatRoomId, req.userId))) {
+    return res.status(403).json({ message: '이 채팅방에 접근할 권한이 없어요.' });
+  }
+  const isSender = message.senderId === req.userId;
+  if (action === 'withdraw' ? !isSender : isSender) {
+    return res.status(403).json({ message: action === 'withdraw' ? '본인이 보낸 제안만 취소할 수 있어요.' : '내가 보낸 제안에는 답할 수 없어요.' });
+  }
+  if (action === 'accept' && message.reservationNote < kstDateKey(new Date())) {
+    return res.status(409).json({ message: '이미 지난 날짜예요.' });
+  }
+
+  // 두 사람이 거의 동시에 답해도 한 번만 바뀌게, 아직 대기 중일 때만 바꿈
+  const { count } = await prisma.message.updateMany({
+    where: { id: messageId, reservationStatus: 'PENDING' },
+    data: { reservationStatus: nextStatus },
+  });
+  if (!count) return res.status(409).json({ message: '이미 답한 제안이에요.' });
+  const updated = await prisma.message.findUnique({ where: { id: messageId } });
+
+  await notifyRoom(message.chatRoomId, req.userId, 'newMessage', { roomId: message.chatRoomId, message: serializeMessage(updated) });
+  const label = dateAskLabel(message.reservationNote);
+  if (action === 'accept') pushToRoom(message.chatRoomId, req.userId, `${label} 좋아요! 시간이랑 장소를 정해봐요`);
+  else if (action === 'decline') pushToRoom(message.chatRoomId, req.userId, `${label}은 어려워요`);
+  return res.json({ message: serializeMessage(updated) });
+}
+
 // 두 사람이 실제로(수락된 상태로) 친구인지 확인 - 친구 아닌 사람은 그룹에 못 넣게 막기 위함
 async function areFriends(userIdA, userIdB) {
   const accepted = await prisma.friendRequest.findFirst({
@@ -2437,6 +2528,8 @@ module.exports = {
   sendTimeProposal,
   voteTimeProposal,
   cancelTimeProposal,
+  sendDateAsk,
+  respondDateAsk,
   sendLocationSuggest,
   acceptLocationSuggest,
   declineLocationSuggest,

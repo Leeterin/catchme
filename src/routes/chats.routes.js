@@ -17,6 +17,8 @@ const {
   sendTimeProposal,
   voteTimeProposal,
   cancelTimeProposal,
+  sendDateAsk,
+  respondDateAsk,
   sendLocationSuggest,
   acceptLocationSuggest,
   declineLocationSuggest,
@@ -56,6 +58,7 @@ router.post('/:roomId/messages', sendTextMessage);
 router.post('/:roomId/images', imageUploadLimiter, sendImageMessage);
 router.post('/:roomId/reservations', sendReservationRequest);
 router.post('/:roomId/time-proposals', sendTimeProposal);
+router.post('/:roomId/date-asks', sendDateAsk);
 router.post('/:roomId/location-suggestions', sendLocationSuggest);
 router.post('/:roomId/leave', leaveRoom);
 router.post('/:roomId/members', addRoomMembers);
@@ -74,6 +77,7 @@ router.post('/messages/:messageId/cancel', cancelReservationMessage);
 router.post('/messages/:messageId/restore-availability-choice', restoreAvailabilityChoice);
 router.post('/time-proposals/:messageId/vote', voteTimeProposal);
 router.post('/time-proposals/:messageId/cancel', cancelTimeProposal);
+router.post('/date-asks/:messageId/respond', respondDateAsk);
 router.post('/location-suggestions/:messageId/accept', acceptLocationSuggest);
 router.post('/location-suggestions/:messageId/decline', declineLocationSuggest);
 router.post('/location-suggestions/:messageId/withdraw', withdrawLocationSuggest);
