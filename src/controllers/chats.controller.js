@@ -1142,14 +1142,42 @@ async function confirmLocationSuggestionTx(tx, message) {
 
 // 장소가 확정되면 캐치미 장소 DB에 "확정" 기록을 남기고, 이 방의 모임 장소 추천(출발지 모으기/결과 카드)은 이제 필요 없으니 지움
 // (트랜잭션이 끝난 뒤 호출 - 여기서 실패해도 확정 자체는 그대로)
+// 채팅에 띄울 "OO 근처에서 만나요"(주변 핫플 보기) 알림 메시지도 만들어서 돌려줌 - 보내는 건 sendLocationConfirmNotice로
 async function recordLocationConfirm(message, userId) {
-  if (!message) return;
+  if (!message) return null;
   if (message.locationPlaceId) {
     await recordPlaceEvent(prisma, {
       placeId: message.locationPlaceId, type: 'CONFIRM', userId, chatRoomId: message.chatRoomId, messageId: message.id,
     });
   }
   await clearLocationRecommends(message.chatRoomId);
+  try {
+    await supersedeOldLocationNotices(prisma, message.chatRoomId);
+    const pin = await prisma.pinnedItem.findFirst({ where: { chatRoomId: message.chatRoomId, sourceMessageId: message.id }, select: { id: true } });
+    const created = await prisma.message.create({
+      data: {
+        chatRoomId: message.chatRoomId,
+        senderId: userId,
+        type: 'LOCATION_NOTICE',
+        locationPlace: message.locationPlace,
+        locationAddress: message.locationAddress || message.locationPlace,
+        locationLat: message.locationLat,
+        locationLon: message.locationLon,
+        locationNote: pin ? pin.id : (message.locationPinId || null), // 어느 핀 소속인지 (updatePin의 알림과 같은 방식)
+        locationStatus: 'PENDING',
+        locationPlaceId: message.locationPlaceId || null,
+      },
+    });
+    return serializeMessage(created);
+  } catch (err) {
+    console.error('[location-confirm] notice failed:', err.message);
+    return null;
+  }
+}
+
+// 장소 제안 카드가 "확정됨"으로 바뀐 걸 먼저 알린 뒤에 보내야 함 - 반대 순서면 받는 쪽에서 새 알림까지 "변경됐어요"로 접힘
+async function sendLocationConfirmNotice(chatRoomId, userId, notice) {
+  if (notice) await notifyRoom(chatRoomId, userId, 'newMessage', { roomId: chatRoomId, message: notice });
 }
 
 // 새 장소가 정해지면 이 방의 "모임 장소 추천받기" 카드와 요청을 통째로 지움 (모은 출발지도 같이 삭제됨)
@@ -1284,10 +1312,11 @@ async function sendLocationSuggest(req, res) {
   if (immediate && pendingForPlace) {
     const affected = await pendingLocationSuggestIds(roomId);
     await prisma.$transaction((tx) => confirmLocationSuggestionTx(tx, pendingForPlace));
-    await recordLocationConfirm(pendingForPlace, req.userId);
+    const notice = await recordLocationConfirm(pendingForPlace, req.userId);
     const updatedMessages = await broadcastLocationSuggests(roomId, req.userId, affected);
+    await sendLocationConfirmNotice(roomId, req.userId, notice);
     const confirmedMessage = updatedMessages.find((m) => m.id === pendingForPlace.id);
-    return res.status(201).json({ message: confirmedMessage, updatedMessages });
+    return res.status(201).json({ message: confirmedMessage, updatedMessages, notice });
   }
 
   // 캐치미 장소 DB에서 같은 가게를 찾거나 새로 등록 (좌표가 있을 때만)
@@ -1318,9 +1347,10 @@ async function sendLocationSuggest(req, res) {
     // 바로 확정이면 대기 중이던 다른 후보들도 마감되니 같이 알림
     const affected = await pendingLocationSuggestIds(roomId);
     await prisma.$transaction((tx) => confirmLocationSuggestionTx(tx, message));
-    await recordLocationConfirm(message, req.userId);
+    const notice = await recordLocationConfirm(message, req.userId);
     const updatedMessages = await broadcastLocationSuggests(roomId, req.userId, [message.id, ...affected]);
-    return res.status(201).json({ message: updatedMessages.find((m) => m.id === message.id), updatedMessages });
+    await sendLocationConfirmNotice(roomId, req.userId, notice);
+    return res.status(201).json({ message: updatedMessages.find((m) => m.id === message.id), updatedMessages, notice });
   }
 
   if (closedIds.length) {
@@ -1362,14 +1392,16 @@ async function respondToLocationSuggest(req, res, status) {
     return res.status(409).json({ message: '이미 처리된 제안이에요.' });
   }
   const affected = [messageId];
+  let notice = null;
   if (status === 'CONFIRMED') {
     affected.push(...(await pendingLocationSuggestIds(message.chatRoomId)));
     await prisma.$transaction((tx) => confirmLocationSuggestionTx(tx, message));
-    await recordLocationConfirm(message, req.userId);
+    notice = await recordLocationConfirm(message, req.userId);
   }
 
   const updatedMessages = await broadcastLocationSuggests(message.chatRoomId, req.userId, affected);
-  return res.json({ message: updatedMessages.find((m) => m.id === messageId), updatedMessages });
+  await sendLocationConfirmNotice(message.chatRoomId, req.userId, notice);
+  return res.json({ message: updatedMessages.find((m) => m.id === messageId), updatedMessages, notice });
 }
 
 // POST /api/chats/location-suggestions/:messageId/vote — 장소 후보에 투표(다시 누르면 투표 취소).
@@ -1388,6 +1420,7 @@ async function voteLocationSuggest(req, res) {
   }
   const roomId = message.chatRoomId;
   const affected = await pendingLocationSuggestIds(roomId);
+  let notice = null;
 
   const existing = await prisma.locationSuggestVote.findUnique({
     where: { messageId_userId: { messageId, userId: req.userId } },
@@ -1425,13 +1458,14 @@ async function voteLocationSuggest(req, res) {
           if (count) await confirmLocationSuggestionTx(tx, winner);
           return count > 0;
         });
-        if (won) await recordLocationConfirm(winner, req.userId);
+        if (won) notice = await recordLocationConfirm(winner, req.userId);
       }
     }
   }
 
   const updatedMessages = await broadcastLocationSuggests(roomId, req.userId, affected);
-  return res.json({ message: updatedMessages.find((m) => m.id === messageId), updatedMessages });
+  await sendLocationConfirmNotice(roomId, req.userId, notice);
+  return res.json({ message: updatedMessages.find((m) => m.id === messageId), updatedMessages, notice });
 }
 
 // POST /api/chats/location-suggestions/:messageId/fix — 투표 없이 이 장소로 바로 확정 (방 사람 누구나)
@@ -1459,10 +1493,11 @@ async function fixLocationSuggest(req, res) {
     return true;
   });
   if (!confirmed) return res.status(409).json({ message: '이미 처리된 제안이에요.' });
-  await recordLocationConfirm(message, req.userId);
+  const notice = await recordLocationConfirm(message, req.userId);
 
   const updatedMessages = await broadcastLocationSuggests(message.chatRoomId, req.userId, affected);
-  return res.json({ message: updatedMessages.find((m) => m.id === messageId), updatedMessages });
+  await sendLocationConfirmNotice(message.chatRoomId, req.userId, notice);
+  return res.json({ message: updatedMessages.find((m) => m.id === messageId), updatedMessages, notice });
 }
 
 // POST /api/chats/location-suggestions/:messageId/withdraw — 보낸 사람이 대기중인 제안을 스스로 취소
