@@ -651,9 +651,9 @@ async function sendTextMessage(req, res) {
   });
 
   await notifyRoom(roomId, req.userId, 'newMessage', { roomId, message: serializeMessage(message) });
-  // 친구 캘린더 일정 공유(⟦cal|...⟧ 머리말)는 푸시에 머리말 대신 "📅 일정 공유"로 보여줌
+  // 친구 캘린더 일정 공유(⟦cal|...⟧ 머리말)는 푸시에 머리말 대신 "일정 공유"로 보여줌
   const calShare = /^\u27E6cal\|[^\u27E7]*\u27E7\n?/.exec(message.text);
-  const pushText = calShare ? `📅 일정 공유${message.text.slice(calShare[0].length).trim() ? ' - ' + message.text.slice(calShare[0].length).trim() : ''}` : message.text;
+  const pushText = calShare ? `일정 공유${message.text.slice(calShare[0].length).trim() ? ' - ' + message.text.slice(calShare[0].length).trim() : ''}` : message.text;
   pushToRoom(roomId, req.userId, pushText.length > 100 ? `${pushText.slice(0, 100)}…` : pushText);
 
   return res.status(201).json({ message: serializeMessage(message) });
