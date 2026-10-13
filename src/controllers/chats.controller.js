@@ -51,7 +51,7 @@ function pushToRoom(chatRoomId, senderId, body) {
     if (!room) return;
     const targets = room.members.filter((m) => m.userId !== senderId && !m.muted).map((m) => m.userId);
     if (targets.length === 0) return;
-    const senderName = room.members.find((m) => m.userId === senderId)?.user?.name || 'CATCHME';
+    const senderName = room.members.find((m) => m.userId === senderId)?.user?.name || 'MEETZIP';
     const title = room.isGroup ? (room.name || '그룹 채팅') : senderName;
     const text = room.isGroup ? `${senderName}: ${body}` : body;
     pushInBackground(targets, { title, body: text, data: { type: 'chat', roomId: chatRoomId } });

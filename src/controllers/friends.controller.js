@@ -10,7 +10,7 @@ function pushFriendRequest(senderId, receiverId, autoAccept) {
   prisma.user.findUnique({ where: { id: senderId }, select: { name: true } }).then((sender) => {
     const name = sender?.name || '누군가';
     pushInBackground([receiverId], {
-      title: 'CATCHME',
+      title: 'MEETZIP',
       body: autoAccept ? `${name}님과 친구가 됐어요` : `${name}님이 친구 요청을 보냈어요`,
       data: { type: 'friend' },
     });

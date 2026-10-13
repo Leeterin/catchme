@@ -413,9 +413,9 @@ async function sendResetEmail(toEmail, resetLink) {
       'Content-Type': 'application/json',
     },
     body: JSON.stringify({
-      from: process.env.RESEND_FROM_EMAIL || 'CATCHME <onboarding@resend.dev>',
+      from: process.env.RESEND_FROM_EMAIL || 'MEETZIP <onboarding@resend.dev>',
       to: [toEmail],
-      subject: 'CATCHME 비밀번호 재설정',
+      subject: 'MEETZIP 비밀번호 재설정',
       html: `
         <div style="font-family:sans-serif;max-width:420px;margin:0 auto;">
           <h2>비밀번호 재설정</h2>

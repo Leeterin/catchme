@@ -577,7 +577,7 @@ async function respondInvite(req, res) {
       // 링크를 보낸 사람이 앱으로 돌아오는 첫 계기 - 새 응답이 올 때마다 휴대폰 알림 (고친 응답은 조용히)
       const count = updated ? updated.responses.length : 0;
       pushInBackground([poll.creatorId], {
-        title: 'CATCHME',
+        title: 'MEETZIP',
         body: `${name}님이 '${poll.title}'에 되는 시간을 보냈어요${count > 1 ? ` (지금 ${count}명 응답)` : ''}`,
         data: { type: 'invite', token: poll.token },
       });
@@ -652,7 +652,7 @@ async function confirmInvite(req, res) {
       notifyUser(uid, 'inviteUpdated', { token: poll.token, title: poll.title, kind: 'confirmed' });
     });
     pushInBackground(result.filter((uid) => uid !== req.userId), {
-      title: 'CATCHME',
+      title: 'MEETZIP',
       body: `'${poll.title}' 약속이 확정됐어요!`,
       data: { type: 'invite', token: poll.token },
     });
@@ -704,7 +704,7 @@ async function cancelInvite(req, res) {
     notifyIds.forEach((uid) => notifyUser(uid, 'inviteUpdated', { token: poll.token, title: poll.title, kind: 'cancelled' }));
     if (notifyIds.length) {
       pushInBackground(notifyIds, {
-        title: 'CATCHME',
+        title: 'MEETZIP',
         body: `'${poll.title}' 약속이 취소됐어요`,
         data: { type: 'invite', token: poll.token },
       });
@@ -833,7 +833,7 @@ function upcomingRanges(poll, openCells) {
 }
 
 function invitePreview(poll, openCells) {
-  if (!poll) return { title: '캐치미 약속 링크', description: '링크를 찾을 수 없어요.' };
+  if (!poll) return { title: 'MEETZIP 약속 링크', description: '링크를 찾을 수 없어요.' };
   const who = (poll.creator && (poll.creator.name || poll.creator.username)) || '친구';
   const where = poll.placeName ? ` @ ${poll.placeName}` : '';
   if (poll.status === 'CANCELLED') return { title: `${poll.title}`, description: '취소된 약속이에요.' };
@@ -875,7 +875,7 @@ async function shareInvitePage(req, res) {
     preview = invitePreview(poll, poll ? await openCellsForPoll(poll) : null);
   } catch (err) {
     console.error('[shareInvitePage]', err);
-    preview = { title: '캐치미 약속 링크', description: '되는 시간만 눌러주세요' };
+    preview = { title: 'MEETZIP 약속 링크', description: '되는 시간만 눌러주세요' };
   }
   const self = `${req.protocol}://${req.get('host')}`;
   const t = escapeHtml(preview.title);
@@ -889,7 +889,7 @@ async function shareInvitePage(req, res) {
 <title>${t}</title>
 <meta name="description" content="${d}">
 <meta property="og:type" content="website">
-<meta property="og:site_name" content="캐치미">
+<meta property="og:site_name" content="MEETZIP">
 <meta property="og:title" content="${t}">
 <meta property="og:description" content="${d}">
 <meta property="og:image" content="${escapeHtml(`${self}/share/catchme.png`)}">
@@ -899,7 +899,7 @@ async function shareInvitePage(req, res) {
 <meta name="twitter:card" content="summary">
 </head><body data-target="${u}" style="font-family:sans-serif;text-align:center;padding:40px 16px">
 <p>${t}</p>
-<p><a href="${u}">캐치미에서 열기</a></p>
+<p><a href="${u}">MEETZIP에서 열기</a></p>
 <script src="/share/go.js"></script>
 </body></html>`);
 }
