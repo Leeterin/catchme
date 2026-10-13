@@ -808,6 +808,7 @@ model UserSettings {
 
   workEmoji String @default("💼") // 업무용 링크에 연 시간에 붙는 이모티콘
   colorLabels String[] @default([]) // 일정 색 라벨 10개 이름 (빈칸 = 기본 이름)
+  homeOrder   String[] @default([]) // 설정 > 홈 화면 편집 - 홈 카드 순서 (비어 있으면 기본 순서)
 
   updatedAt DateTime @updatedAt
 

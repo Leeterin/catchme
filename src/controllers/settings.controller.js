@@ -15,6 +15,7 @@ const DEFAULTS = {
   chatPreview: true,
   workEmoji: '💼',
   colorLabels: [],
+  homeOrder: [],
 };
 
 function serializeSettings(s) {
@@ -33,6 +34,7 @@ function serializeSettings(s) {
     chatPreview: s.chatPreview,
     workEmoji: s.workEmoji,
     colorLabels: s.colorLabels,
+    homeOrder: s.homeOrder || [],
   };
 }
 
@@ -62,6 +64,11 @@ async function updateSettings(req, res) {
         // 일정 색 라벨 이름 - 10개까지, 하나당 12자까지 (빈칸은 기본 이름)
         if (Array.isArray(req.body[key])) {
           data[key] = req.body[key].slice(0, 10).map((n) => (typeof n === 'string' ? n.trim().slice(0, 12) : ''));
+        }
+      } else if (key === 'homeOrder') {
+        // 홈 카드 순서 - 카드 이름(영문 소문자)만, 중복 없이 20개까지
+        if (Array.isArray(req.body[key])) {
+          data[key] = [...new Set(req.body[key].filter((k) => typeof k === 'string' && /^[a-z]{1,20}$/.test(k)))].slice(0, 20);
         }
       } else if (typeof req.body[key] === 'boolean') {
         data[key] = req.body[key];
