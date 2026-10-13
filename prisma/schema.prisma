@@ -71,6 +71,7 @@ model User {
   feedPostLikes    FeedPostLike[]
   feedPostSaves    FeedPostSave[]
   placeSaves       PlaceSave[]
+  monthlyGoals     MonthlyGoal[]
   feedPostComments FeedPostComment[]
   reportsMade      Report[]
   meetupReviews    MeetupReview[]
@@ -953,4 +954,31 @@ model UserEngagement {
   updatedAt     DateTime @updatedAt
 
   @@map("user_engagement")
+}
+
+// 홈 "이번 달 목표" - 운동·책 읽기처럼 한 달에 몇 번 할지 정하고, 직접 [+1]을 눌러서 셈 (캘린더와 자동 연동 없음)
+model MonthlyGoal {
+  id        String   @id @default(uuid())
+  userId    String
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  title     String
+  target    Int // 한 달 목표 횟수
+  createdAt DateTime @default(now())
+
+  counts MonthlyGoalCount[]
+
+  @@index([userId])
+  @@map("monthly_goals")
+}
+
+// 목표별 달마다 누른 횟수 (month = "YYYY-MM", 한국 날짜 기준) - 다음 달엔 새 줄이라 0부터, 지난달 기록은 남음
+model MonthlyGoalCount {
+  id     String      @id @default(uuid())
+  goalId String
+  goal   MonthlyGoal @relation(fields: [goalId], references: [id], onDelete: Cascade)
+  month  String
+  count  Int         @default(0)
+
+  @@unique([goalId, month])
+  @@map("monthly_goal_counts")
 }
