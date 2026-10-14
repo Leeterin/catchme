@@ -67,15 +67,4 @@ async function createReport(req, res) {
   return res.status(201).json({ message: '신고가 접수됐어요. 검토 후 조치할게요.' });
 }
 
-// GET /api/reports/trust/:userId
-// 아주 단순한 신뢰 지표 - "노쇼" 사유로 접수된 신고가 일정 건수 이상이면 알려줌.
-// (자동으로 뭔가 제재하진 않고, 다른 사람이 참고할 수 있게 살짝 표시만 해줌)
-async function getTrustInfo(req, res) {
-  const { userId } = req.params;
-  const noShowCount = await prisma.report.count({
-    where: { targetType: 'USER', targetId: userId, reason: '노쇼' },
-  });
-  return res.json({ noShowCount, hasNoShowHistory: noShowCount >= 2 });
-}
-
-module.exports = { createReport, getTrustInfo };
+module.exports = { createReport };
