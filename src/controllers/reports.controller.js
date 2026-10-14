@@ -39,7 +39,7 @@ async function createReport(req, res) {
         images: imageList,
       },
     });
-    return res.status(201).json({ message: '오류 신고가 접수됐어요. 고마워요!' });
+    return res.status(201).json({ message: '소중한 의견 감사합니다. 확인 후 빠르게 고칠게요!' });
   }
   if (!VALID_TARGET_TYPES.includes(targetType)) {
     return res.status(400).json({ message: '신고 대상 종류가 올바르지 않아요.' });
