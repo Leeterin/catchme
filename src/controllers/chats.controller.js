@@ -661,7 +661,15 @@ async function sendTextMessage(req, res) {
   await notifyRoom(roomId, req.userId, 'newMessage', { roomId, message: serializeMessage(message) });
   // 친구 캘린더 일정 공유(⟦cal|...⟧ 머리말)는 푸시에 머리말 대신 "일정 공유"로 보여줌
   const calShare = /^\u27E6cal\|[^\u27E7]*\u27E7\n?/.exec(message.text);
-  const pushText = calShare ? `일정 공유${message.text.slice(calShare[0].length).trim() ? ' - ' + message.text.slice(calShare[0].length).trim() : ''}` : message.text;
+  // 소식 탭 리뷰 공유(⟦post|글id|사진|제목|...⟧ 머리말)는 "제목 리뷰 공유"로
+  const postShare = /^\u27E6post\|[^|\u27E7]*\|[^|\u27E7]*\|([^|\u27E7]*)[^\u27E7]*\u27E7\n?/.exec(message.text);
+  let postTitle = '';
+  if (postShare) { try { postTitle = decodeURIComponent(postShare[1]); } catch (_) { postTitle = ''; } }
+  const shareHead = calShare || postShare;
+  const shareRest = shareHead ? message.text.slice(shareHead[0].length).trim() : '';
+  const pushText = calShare ? `일정 공유${shareRest ? ' - ' + shareRest : ''}`
+    : postShare ? `${postTitle || '추천'} 리뷰 공유${shareRest ? ' - ' + shareRest : ''}`
+      : message.text;
   pushToRoom(roomId, req.userId, pushText.length > 100 ? `${pushText.slice(0, 100)}…` : pushText);
 
   return res.status(201).json({ message: serializeMessage(message) });
