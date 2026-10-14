@@ -54,7 +54,15 @@ function pushToRoom(chatRoomId, senderId, body) {
     const senderName = room.members.find((m) => m.userId === senderId)?.user?.name || 'MEETZIP';
     const title = room.isGroup ? (room.name || '그룹 채팅') : senderName;
     const text = room.isGroup ? `${senderName}: ${body}` : body;
-    pushInBackground(targets, { title, body: text, data: { type: 'chat', roomId: chatRoomId } });
+    const data = { type: 'chat', roomId: chatRoomId };
+    // 설정 > 채팅 > '알림에 메시지 미리보기 표시'를 끈 사람에겐 내용 없이 보냄 (잠금화면에 메시지가 안 보이게)
+    const hidePreview = new Set((await prisma.userSettings.findMany({
+      where: { userId: { in: targets }, chatPreview: false }, select: { userId: true },
+    })).map((s) => s.userId));
+    const showTargets = targets.filter((id) => !hidePreview.has(id));
+    const hideTargets = targets.filter((id) => hidePreview.has(id));
+    if (showTargets.length) pushInBackground(showTargets, { title, body: text, data });
+    if (hideTargets.length) pushInBackground(hideTargets, { title, body: '새 메시지가 왔어요', data });
   })().catch((err) => console.error('[pushToRoom]', err.message));
 }
 
