@@ -2182,6 +2182,37 @@ async function updatePin(req, res) {
   return res.json({ pin: updated, message: noticeMessage });
 }
 
+// PATCH /api/chats/:roomId/pins/place-order   body: { slots: [pinId...], order: [pinId...] }
+// 약속 장소(1차, 2차...) 순서 바꾸기 - 핀 자리(slots)는 그대로 두고 장소 내용만 order 순서대로 옮겨 담음
+// (일정 카드 자체가 1차 자리일 수 있어서 핀을 옮기지 않고 장소만 바꿈). 장소 변경 알림 메시지는 만들지 않음
+async function reorderPinPlaces(req, res) {
+  const { roomId } = req.params;
+  if (!(await assertMembership(roomId, req.userId))) {
+    return res.status(403).json({ message: '이 채팅방에 접근할 권한이 없어요.' });
+  }
+  const { slots, order } = req.body;
+  if (!Array.isArray(slots) || !Array.isArray(order) || slots.length < 2 || slots.length > 20
+    || slots.length !== order.length || new Set(slots).size !== slots.length
+    || [...slots].sort().join() !== [...order].sort().join()) {
+    return res.status(400).json({ message: '순서 정보가 올바르지 않아요.' });
+  }
+  const pins = await prisma.pinnedItem.findMany({ where: { id: { in: slots }, chatRoomId: roomId } });
+  if (pins.length !== slots.length) {
+    return res.status(404).json({ message: '핀을 찾을 수 없어요.' });
+  }
+  const byId = new Map(pins.map((p) => [p.id, p]));
+  await prisma.$transaction(slots.map((slotId, i) => {
+    const src = byId.get(order[i]);
+    return prisma.pinnedItem.update({
+      where: { id: slotId },
+      data: { location: src.location, locationAddress: src.locationAddress, locationLat: src.locationLat, locationLon: src.locationLon },
+    });
+  }));
+  await notifyRoom(roomId, req.userId, 'pinsChanged', { roomId });
+  const updated = await prisma.pinnedItem.findMany({ where: { chatRoomId: roomId }, orderBy: { createdAt: 'asc' } });
+  return res.json({ pins: updated });
+}
+
 // DELETE /api/chats/pins/:pinId
 async function deletePin(req, res) {
   const { pinId } = req.params;
@@ -2592,6 +2623,7 @@ module.exports = {
   listPins,
   createPin,
   updatePin,
+  reorderPinPlaces,
   deletePin,
   requestLocationRecommend,
   respondLocationRecommend,

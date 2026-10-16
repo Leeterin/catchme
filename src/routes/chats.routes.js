@@ -35,6 +35,7 @@ const {
   listPins,
   createPin,
   updatePin,
+  reorderPinPlaces,
   deletePin,
   requestLocationRecommend,
   respondLocationRecommend,
@@ -67,6 +68,7 @@ router.post('/:roomId/read', markRoomRead);
 router.post('/:roomId/mute', setRoomMuted);
 router.get('/:roomId/pins', listPins);
 router.post('/:roomId/pins', createPin);
+router.patch('/:roomId/pins/place-order', reorderPinPlaces);
 router.patch('/pins/:pinId', updatePin);
 router.delete('/pins/:pinId', deletePin);
 router.delete('/messages/:messageId', deleteMessage);
