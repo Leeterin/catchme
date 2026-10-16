@@ -408,49 +408,49 @@ async function sendRequest(req, res) {
   const receiverSettings = await prisma.userSettings.findUnique({ where: { userId: receiver.id } });
   const autoAccept = !!(receiverSettings && receiverSettings.friendAutoaccept);
 
-  // 이미 어느 방향으로든 요청이 있었는지 확인 (수락된 관계 포함)
-  const existing = await prisma.friendRequest.findFirst({
-    where: {
-      OR: [
-        { senderId: req.userId, receiverId: receiver.id },
-        { senderId: receiver.id, receiverId: req.userId },
-      ],
-    },
-  });
-
-  if (existing) {
-    if (existing.status === 'ACCEPTED') {
-      return res.status(409).json({ message: '이미 친구예요.' });
-    }
-    if (existing.status === 'PENDING') {
-      return res.status(409).json({ message: '이미 친구 요청을 보냈거나 받은 상태예요.' });
-    }
-    // 예전에 거절됐던 요청이면 다시 PENDING(또는 자동수락이면 ACCEPTED)으로 재사용
-    const revived = await prisma.friendRequest.update({
-      where: { id: existing.id },
-      data: {
-        status: autoAccept ? 'ACCEPTED' : 'PENDING',
-        senderId: req.userId,
-        receiverId: receiver.id,
-        respondedAt: autoAccept ? new Date() : null,
+  // 두 사람 사이의 요청 확인·만들기는 한 번에 하나씩 - 잠금 없이 두 번 누르거나 서로 동시에 보내면 요청이 두 개 생겼음
+  const outcome = await prisma.$transaction(async (tx) => {
+    await tx.$executeRawUnsafe('SELECT pg_advisory_xact_lock(hashtext($1))', `friend-request:${[req.userId, receiver.id].sort().join(':')}`);
+    // 이미 어느 방향으로든 요청이 있었는지 확인 (수락된 관계 포함)
+    const existing = await tx.friendRequest.findFirst({
+      where: {
+        OR: [
+          { senderId: req.userId, receiverId: receiver.id },
+          { senderId: receiver.id, receiverId: req.userId },
+        ],
       },
     });
-    notifyUser(receiver.id, autoAccept ? 'friendsChanged' : 'friendRequestReceived', {});
-  pushFriendRequest(req.userId, receiver.id, autoAccept);
-    return res.status(201).json({
-      message: autoAccept ? '친구가 됐어요! (상대방이 자동 수락을 켜뒀어요)' : '친구 요청을 보냈어요.',
-      requestId: revived.id,
-    });
-  }
 
-  const created = await prisma.friendRequest.create({
-    data: {
-      senderId: req.userId,
-      receiverId: receiver.id,
-      status: autoAccept ? 'ACCEPTED' : 'PENDING',
-      respondedAt: autoAccept ? new Date() : null,
-    },
+    if (existing) {
+      if (existing.status === 'ACCEPTED') return { conflict: '이미 친구예요.' };
+      if (existing.status === 'PENDING') return { conflict: '이미 친구 요청을 보냈거나 받은 상태예요.' };
+      // 예전에 거절됐던 요청이면 다시 PENDING(또는 자동수락이면 ACCEPTED)으로 재사용
+      return {
+        saved: await tx.friendRequest.update({
+          where: { id: existing.id },
+          data: {
+            status: autoAccept ? 'ACCEPTED' : 'PENDING',
+            senderId: req.userId,
+            receiverId: receiver.id,
+            respondedAt: autoAccept ? new Date() : null,
+          },
+        }),
+      };
+    }
+
+    return {
+      saved: await tx.friendRequest.create({
+        data: {
+          senderId: req.userId,
+          receiverId: receiver.id,
+          status: autoAccept ? 'ACCEPTED' : 'PENDING',
+          respondedAt: autoAccept ? new Date() : null,
+        },
+      }),
+    };
   });
+  if (outcome.conflict) return res.status(409).json({ message: outcome.conflict });
+  const created = outcome.saved;
   // 받는 사람한테 실시간으로 알려줘서, 새로고침 안 해도 "받은 요청" 목록에 바로 뜨게 함
   notifyUser(receiver.id, autoAccept ? 'friendsChanged' : 'friendRequestReceived', {});
   pushFriendRequest(req.userId, receiver.id, autoAccept);

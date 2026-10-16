@@ -211,9 +211,13 @@ async function cancelMeetup(req, res) {
     return res.status(409).json({ message: '이미 취소된 모임이에요.' });
   }
 
-  const updated = await prisma.meetup.update({
+  // 두 번 누르면 둘 다 "아직 안 취소됨"으로 보고 취소 안내를 두 번 남겼음 - 안 취소된 경우에만 바꿈
+  const changed = await prisma.meetup.updateMany({ where: { id, cancelled: false }, data: { cancelled: true } });
+  if (changed.count === 0) {
+    return res.status(409).json({ message: '이미 취소된 모임이에요.' });
+  }
+  const updated = await prisma.meetup.findUnique({
     where: { id },
-    data: { cancelled: true },
     include: {
       creator: { select: { id: true, username: true, name: true } },
       participants: { select: { userId: true, status: true } },

@@ -550,16 +550,14 @@ async function getOrCreateDirectRoom(req, res) {
   // 주의: 상대방이 멤버인지만 보고 찾으면, 상대방이 전혀 다른 사람과 만든 1:1 방을 잘못 찾아와서
   // 그 방에 나를 3번째 멤버로 끼워넣는 심각한 버그가 생김(상대방이 원래 대화하던 사람의 이름/사진이
   // 내 화면에 뒤섞여 보이는 원인). 반드시 "나"와 "상대방"이 함께 속한 방인지 둘 다 확인해야 함.
-  const existing = await prisma.chatRoom.findFirst({
-    where: {
-      isGroup: false,
-      AND: [
-        { members: { some: { userId: req.userId } } },
-        { members: { some: { userId: other.id } } },
-      ],
-    },
-    include: { members: true },
-  });
+  const directRoomWhere = {
+    isGroup: false,
+    AND: [
+      { members: { some: { userId: req.userId } } },
+      { members: { some: { userId: other.id } } },
+    ],
+  };
+  const existing = await prisma.chatRoom.findFirst({ where: directRoomWhere, include: { members: true } });
 
   if (existing) {
     const mine = existing.members.find((m) => m.userId === req.userId);
@@ -591,14 +589,21 @@ async function getOrCreateDirectRoom(req, res) {
     }
   }
 
-  const room = await prisma.chatRoom.create({
-    data: {
-      isGroup: false,
-      members: { create: [{ userId: req.userId }, { userId: other.id }] },
-    },
+  const room = await prisma.$transaction(async (tx) => {
+    // 두 사람 사이의 첫 1:1 방 만들기는 한 번에 하나씩 - 잠금 없이 두 번 누르거나 둘이 동시에 열면 방이 두 개 생겼음
+    await tx.$executeRawUnsafe('SELECT pg_advisory_xact_lock(hashtext($1))', `direct-room:${[req.userId, other.id].sort().join(':')}`);
+    const again = await tx.chatRoom.findFirst({ where: directRoomWhere, select: { id: true } });
+    if (again) return { id: again.id, created: false };
+    const createdRoom = await tx.chatRoom.create({
+      data: {
+        isGroup: false,
+        members: { create: [{ userId: req.userId }, { userId: other.id }] },
+      },
+    });
+    return { id: createdRoom.id, created: true };
   });
 
-  return res.status(201).json({ roomId: room.id, created: true });
+  return res.status(room.created ? 201 : 200).json({ roomId: room.id, created: room.created });
 }
 
 // GET /api/chats/:roomId/messages?cursor=&limit=
@@ -1935,6 +1940,18 @@ async function leaveRoom(req, res) {
 
   const room = await prisma.chatRoom.findUnique({ where: { id: roomId }, select: { isGroup: true } });
 
+  // 1:1 방은 멤버에서 빼지 않고 "채팅방 삭제"처럼 지금까지의 대화만 내 쪽에서 안 보이게 함.
+  // 멤버에서 빼버리면 상대가 그 뒤로 보내는 메시지를 아무도 못 봤고, 다시 대화를 열면 방이 새로 만들어졌음
+  // (새 메시지가 오거나 내가 다시 열면 같은 방이 그 메시지부터 다시 보임)
+  if (room && !room.isGroup) {
+    const now = new Date();
+    await prisma.chatRoomMember.updateMany({
+      where: { chatRoomId: roomId, userId: req.userId },
+      data: { clearedAt: now, lastReadAt: now },
+    });
+    return res.json({ message: '채팅방을 나갔어요.' });
+  }
+
   // 나가기를 두 번 눌렀으면 먼저 온 요청이 이미 처리했으니, "나갔어요" 안내를 또 남기지 않고 그대로 끝냄
   const removed = await prisma.chatRoomMember.deleteMany({ where: { chatRoomId: roomId, userId: req.userId } });
   if (removed.count === 0) return res.json({ message: '채팅방을 나갔어요.' });
@@ -2301,26 +2318,37 @@ async function requestLocationRecommend(req, res) {
   const resolved = await resolveLocationInput(req.userId, req.body);
   if (!resolved.ok) return res.status(resolved.statusCode).json({ message: resolved.message });
 
-  const request = await prisma.locationRecommendRequest.create({
-    data: {
-      chatRoomId: roomId,
-      requesterId: req.userId,
-      mode,
-      responses: { create: [{ userId: req.userId, address: resolved.address, lat: resolved.lat, lon: resolved.lon }] },
-    },
-  });
+  const created = await prisma.$transaction(async (tx) => {
+    // 같은 방에서 두 사람이 거의 동시에 시작하면 진행 중인 추천이 두 개 생겼음 - 방마다 한 번에 하나씩 확인하고 만듦
+    await tx.$executeRawUnsafe('SELECT pg_advisory_xact_lock(hashtext($1))', `location-recommend:${roomId}`);
+    const running = await tx.locationRecommendRequest.findFirst({ where: { chatRoomId: roomId, status: 'COLLECTING' } });
+    if (running) return { running };
+    const newRequest = await tx.locationRecommendRequest.create({
+      data: {
+        chatRoomId: roomId,
+        requesterId: req.userId,
+        mode,
+        responses: { create: [{ userId: req.userId, address: resolved.address, lat: resolved.lat, lon: resolved.lon }] },
+      },
+    });
 
-  // 카카오톡 투표처럼 채팅방에 "출발지를 입력해주세요" 카드를 바로 남김 - 이 카드에서 각자 출발지를 내고
-  // (주소는 비공개, 인원 수만 공개), 다 모이면 같은 카드가 결과 카드로 바뀜
-  await prisma.message.create({
-    data: {
-      chatRoomId: roomId,
-      senderId: req.userId,
-      type: 'LOCATION_RECOMMEND',
-      recommendRequestId: request.id,
-      recommendMode: mode,
-    },
+    // 카카오톡 투표처럼 채팅방에 "출발지를 입력해주세요" 카드를 바로 남김 - 이 카드에서 각자 출발지를 내고
+    // (주소는 비공개, 인원 수만 공개), 다 모이면 같은 카드가 결과 카드로 바뀜
+    await tx.message.create({
+      data: {
+        chatRoomId: roomId,
+        senderId: req.userId,
+        type: 'LOCATION_RECOMMEND',
+        recommendRequestId: newRequest.id,
+        recommendMode: mode,
+      },
+    });
+    return { request: newRequest };
   });
+  if (created.running) {
+    return res.status(409).json({ message: '이미 진행 중인 장소 추천이 있어요.', requestId: created.running.id });
+  }
+  const { request } = created;
   const message = await broadcastLocationRecommendCard(request.id);
 
   return res.status(201).json({ requestId: request.id, mode, status: request.status, message: message ? serializeMessage(message) : null });

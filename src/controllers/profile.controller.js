@@ -212,24 +212,30 @@ async function saveSavedLocation(req, res) {
     }
   }
 
-  if (FIXED_LABELS.includes(label)) {
-    // 집/회사/학교는 유저당 하나씩만 - 이미 있으면 그 자리에 덮어씀
-    const existing = await prisma.savedLocation.findFirst({ where: { userId: req.userId, label } });
-    const saved = existing
-      ? await prisma.savedLocation.update({ where: { id: existing.id }, data: { address: address.trim(), lat, lon } })
-      : await prisma.savedLocation.create({ data: { userId: req.userId, label, address: address.trim(), lat, lon } });
-    return res.json({ location: serializeSavedLocation(saved) });
-  }
+  // 내 장소 저장은 한 번에 하나씩 - 잠금 없이 두 번 누르면 "회사"가 두 개 생기거나 개수 제한을 넘길 수 있었음
+  const result = await prisma.$transaction(async (tx) => {
+    await tx.$executeRawUnsafe('SELECT pg_advisory_xact_lock(hashtext($1))', `saved-location:${req.userId}`);
+    if (FIXED_LABELS.includes(label)) {
+      // 집/회사/학교는 유저당 하나씩만 - 이미 있으면 그 자리에 덮어씀
+      const existing = await tx.savedLocation.findFirst({ where: { userId: req.userId, label } });
+      const saved = existing
+        ? await tx.savedLocation.update({ where: { id: existing.id }, data: { address: address.trim(), lat, lon } })
+        : await tx.savedLocation.create({ data: { userId: req.userId, label, address: address.trim(), lat, lon } });
+      return { status: 200, saved };
+    }
 
-  const customCount = await prisma.savedLocation.count({ where: { userId: req.userId, label: 'CUSTOM' } });
-  if (customCount >= MAX_CUSTOM_LOCATIONS) {
+    const customCount = await tx.savedLocation.count({ where: { userId: req.userId, label: 'CUSTOM' } });
+    if (customCount >= MAX_CUSTOM_LOCATIONS) return { full: true };
+
+    const saved = await tx.savedLocation.create({
+      data: { userId: req.userId, label: 'CUSTOM', customLabel: trimmedCustomLabel, address: address.trim(), lat, lon },
+    });
+    return { status: 201, saved };
+  });
+  if (result.full) {
     return res.status(400).json({ message: `자주 쓰는 장소는 최대 ${MAX_CUSTOM_LOCATIONS}개까지 저장할 수 있어요.` });
   }
-
-  const saved = await prisma.savedLocation.create({
-    data: { userId: req.userId, label: 'CUSTOM', customLabel: trimmedCustomLabel, address: address.trim(), lat, lon },
-  });
-  return res.status(201).json({ location: serializeSavedLocation(saved) });
+  return res.status(result.status).json({ location: serializeSavedLocation(result.saved) });
 }
 
 // PATCH /api/profile/locations/:id   body: { customLabel?, address?, lat?, lon? }
