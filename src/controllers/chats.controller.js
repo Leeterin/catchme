@@ -1935,13 +1935,14 @@ async function leaveRoom(req, res) {
 
   const room = await prisma.chatRoom.findUnique({ where: { id: roomId }, select: { isGroup: true } });
 
-  await prisma.chatRoomMember.delete({
-    where: { chatRoomId_userId: { chatRoomId: roomId, userId: req.userId } },
-  });
+  // 나가기를 두 번 눌렀으면 먼저 온 요청이 이미 처리했으니, "나갔어요" 안내를 또 남기지 않고 그대로 끝냄
+  const removed = await prisma.chatRoomMember.deleteMany({ where: { chatRoomId: roomId, userId: req.userId } });
+  if (removed.count === 0) return res.json({ message: '채팅방을 나갔어요.' });
 
   const remaining = await prisma.chatRoomMember.count({ where: { chatRoomId: roomId } });
   if (remaining === 0) {
-    await prisma.chatRoom.delete({ where: { id: roomId } });
+    // 마지막 두 사람이 동시에 나가면 둘 다 여기로 올 수 있음 - 이미 지워졌으면 그냥 넘어감
+    await prisma.chatRoom.deleteMany({ where: { id: roomId } });
   } else if (room && room.isGroup) {
     const me = await prisma.user.findUnique({ where: { id: req.userId }, select: { id: true, username: true, name: true } });
     const notice = await prisma.message.create({

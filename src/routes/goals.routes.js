@@ -65,13 +65,19 @@ router.post('/:id/count', async (req, res) => {
   const { month } = req.body;
   const delta = req.body.delta === -1 ? -1 : 1;
   if (!isMonth(month)) return res.status(400).json({ message: '달(month)이 올바르지 않아요.' });
-  const row = await prisma.monthlyGoalCount.upsert({
-    where: { goalId_month: { goalId: goal.id, month } },
-    update: {},
-    create: { goalId: goal.id, month, count: 0 },
-  });
-  const next = Math.max(0, row.count + delta);
-  const saved = await prisma.monthlyGoalCount.update({ where: { id: row.id }, data: { count: next } });
+  const key = { goalId_month: { goalId: goal.id, month } };
+  try {
+    await prisma.monthlyGoalCount.upsert({ where: key, update: {}, create: { goalId: goal.id, month, count: 0 } });
+  } catch (err) {
+    if (err.code !== 'P2002') throw err; // 그 달 첫 [+1]을 빠르게 두 번 누르면 다른 요청이 먼저 만들어둠 - 그대로 이어서 셈
+  }
+  // 읽고 나서 새 값을 쓰면 빠르게 여러 번 누를 때 횟수가 사라져서(4번 눌러도 2), DB에서 바로 더하고 뺌
+  if (delta === 1) {
+    await prisma.monthlyGoalCount.update({ where: key, data: { count: { increment: 1 } } });
+  } else {
+    await prisma.monthlyGoalCount.updateMany({ where: { goalId: goal.id, month, count: { gt: 0 } }, data: { count: { decrement: 1 } } });
+  }
+  const saved = await prisma.monthlyGoalCount.findUnique({ where: key });
   res.json({ count: saved.count });
 });
 

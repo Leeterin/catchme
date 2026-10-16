@@ -11,6 +11,9 @@ require('dotenv').config();
 const path = require('path');
 const http = require('http');
 const express = require('express');
+// async 라우트에서 난 에러(예: 같은 일정을 동시에 두 번 삭제할 때 Prisma P2025)를 errorHandler로 넘겨줌.
+// Express 4는 async 함수의 에러를 안 잡아서, 이게 없으면 응답도 없이 처리 안 된 에러로 서버 프로세스가 통째로 꺼졌음
+require('express-async-errors');
 const cors = require('cors');
 const helmet = require('helmet');
 const jwt = require('jsonwebtoken');
@@ -175,6 +178,11 @@ app.use('/share', express.static(path.join(__dirname, '../public/share'), {
 
 app.use(notFoundHandler);
 app.use(errorHandler);
+
+// 라우트 밖(소켓, 예약 작업, 응답 후 백그라운드 처리 등)에서 놓친 Promise 에러도 서버를 끄지 않고 로그만 남김
+process.on('unhandledRejection', (reason) => {
+  console.error('[unhandledRejection]', reason);
+});
 
 const PORT = process.env.PORT || 4000;
 httpServer.listen(PORT, () => {
