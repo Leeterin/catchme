@@ -592,16 +592,23 @@ async function myRoomIdsAmong(userId, friendId, rawEvents) {
   return new Set(rows.map((r) => r.chatRoomId));
 }
 
-// 친구 캘린더 한 시간 칸에 보여줄 일정 - 나랑 잡은 약속이면 공개설정과 상관없이 "나랑 약속"으로(나도 아는 약속이라),
+// 나랑 잡은 약속 칸에 보여줄 제목 - "내이름님과 약속" (나랑 잡은 약속이 없으면 이름은 안 찾음)
+async function withMeTitleFor(userId, myRoomIds) {
+  if (myRoomIds.size === 0) return '나랑 약속';
+  const me = await prisma.user.findUnique({ where: { id: userId }, select: { name: true } });
+  return me && me.name ? `${me.name}님과 약속` : '나랑 약속';
+}
+
+// 친구 캘린더 한 시간 칸에 보여줄 일정 - 나랑 잡은 약속이면 공개설정과 상관없이 "내이름님과 약속"으로(나도 아는 약속이라),
 // 아니면 공개설정을 통과한 바쁨 일정의 제목. 색은 친구가 일정에 정해둔 색 - 공개설정을 통과한 일정 것만 줌(색 라벨 이름에 뜻이 있을 수 있어서)
-function friendSlotsInfo(dateKey, rawEvents, events, myRoomIds) {
+function friendSlotsInfo(dateKey, rawEvents, events, myRoomIds, withMeTitle) {
   const isWithMe = (ev) => !ev.isPendingHold && !!ev.sourceChatRoomId && myRoomIds.has(ev.sourceChatRoomId);
   const slots = MATCH_HOURS.map((hour) => {
     const slotStart = kstDate(dateKey, hour, 0);
     const slotEnd = kstDate(dateKey, hour + 1, 0);
     const overlaps = (ev) => ev.status === 'BUSY' && new Date(ev.startTime) < slotEnd && new Date(ev.endTime) > slotStart;
     const withMe = rawEvents.find((ev) => overlaps(ev) && isWithMe(ev));
-    if (withMe) return { title: '나랑 약속', color: withMe.color || null, withMe: true };
+    if (withMe) return { title: withMeTitle, color: withMe.color || null, withMe: true };
     const match = events.find(overlaps);
     return match ? { title: match.title, color: match.color || null, withMe: false } : { title: null, color: null, withMe: false };
   });
@@ -667,6 +674,7 @@ async function getFriendDaySchedule(req, res) {
     },
   });
   const myRoomIds = await myRoomIdsAmong(req.userId, friend.id, rawEventsFetched);
+  const withMeTitle = await withMeTitleFor(req.userId, myRoomIds);
 
   // 반복 일정은 이 특정 날짜의 요일에 실제로 해당하는지 확인하고, 시간(시:분)은 그대로 두되 날짜만 이 날로 다시 계산함
   const dow = dayStart.getDay();
@@ -715,8 +723,8 @@ async function getFriendDaySchedule(req, res) {
   });
 
   // 제목은 공개설정(친구/비즈니스)을 통과한 일정에서만 가져옴 - "나만보기"거나 분류가 안 맞으면 null이라 프론트에서 "일정"으로만 표시됨
-  // (나랑 잡은 약속은 예외로 "나랑 약속")
-  const { titles, colors, withMe } = friendSlotsInfo(date, rawEvents, events, myRoomIds);
+  // (나랑 잡은 약속은 예외로 "내이름님과 약속")
+  const { titles, colors, withMe } = friendSlotsInfo(date, rawEvents, events, myRoomIds, withMeTitle);
 
   return res.json({ hours: MATCH_HOURS, busy, bookable, titles, colors, withMe });
 }
@@ -777,6 +785,7 @@ async function getFriendMonthSchedule(req, res) {
     },
   });
   const myRoomIds = await myRoomIdsAmong(req.userId, friend.id, rawEventsFetched);
+  const withMeTitle = await withMeTitleFor(req.userId, myRoomIds);
 
   const days = [];
   for (let d = 1; d <= daysInMonth; d++) {
@@ -819,7 +828,7 @@ async function getFriendMonthSchedule(req, res) {
       const slotEnd = kstDate(dateKey, hour + 1, 0);
       return events.some((ev) => ev.status === 'AVAILABLE' && new Date(ev.startTime) < slotEnd && new Date(ev.endTime) > slotStart);
     });
-    const { titles, colors, withMe } = friendSlotsInfo(dateKey, rawEvents, events, myRoomIds);
+    const { titles, colors, withMe } = friendSlotsInfo(dateKey, rawEvents, events, myRoomIds, withMeTitle);
     days.push({ date: dateKey, busy, bookable, titles, colors, withMe });
   }
 
