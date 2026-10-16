@@ -844,6 +844,7 @@ async function respondToReservation(req, res, status) {
 
   let updated;
   let movedSuggestIds = [];
+  let datedPinId = null;
   try {
     updated = await prisma.$transaction(async (tx) => {
       // 상태가 여전히 PENDING일 때만 업데이트되도록 조건을 걸어서, 거의 동시에 두 번 요청이 와도
@@ -906,6 +907,7 @@ async function respondToReservation(req, res, status) {
           sourceMessageId: message.id,
         },
       });
+      datedPinId = datedPin.id;
       movedSuggestIds = await attachUndatedMeetingTx(tx, message.chatRoomId, message.locationPinId, datedPin.id);
     }
 
@@ -918,6 +920,10 @@ async function respondToReservation(req, res, status) {
 
   await notifyRoom(message.chatRoomId, req.userId, 'newMessage', { roomId: message.chatRoomId, message: serializeMessage(updated) });
   if (movedSuggestIds.length) await broadcastLocationSuggests(message.chatRoomId, null, movedSuggestIds);
+  // 장소까지 적어서 보낸 약속 요청이 확정되면 "OO 근처에서 만나요"(주변 핫플 보기) 알림도 만들어서 양쪽에 보여줌
+  // (예전엔 수락한 사람 화면에만 임시로 떠서, 요청한 사람은 못 보고 방을 다시 열면 수락한 사람 화면에서도 사라졌음)
+  const notice = datedPinId ? await createReservationLocationNotice(message, req.userId, datedPinId) : null;
+  await sendLocationConfirmNotice(message.chatRoomId, req.userId, notice);
   const whenLabel =`${formatDateLabel(message.reservationStart)} ${formatTimeLabel(message.reservationStart, message.reservationEnd)}`;
   if (status === 'CONFIRMED' && updated?.reservationStatus === 'CONFIRMED') {
     pushToRoom(message.chatRoomId, req.userId, `약속이 확정됐어요! ${whenLabel}`);
@@ -925,7 +931,7 @@ async function respondToReservation(req, res, status) {
     pushToRoom(message.chatRoomId, req.userId, `${whenLabel} 약속 요청을 거절했어요`);
   }
 
-  return res.json({ message: serializeMessage(updated) });
+  return res.json({ message: serializeMessage(updated), notice });
 }
 
 // POST /api/chats/messages/:messageId/withdraw — 보낸 사람이 대기중인 요청을 스스로 취소
@@ -1203,6 +1209,31 @@ async function recordLocationConfirm(message, userId) {
 // 장소 제안 카드가 "확정됨"으로 바뀐 걸 먼저 알린 뒤에 보내야 함 - 반대 순서면 받는 쪽에서 새 알림까지 "변경됐어요"로 접힘
 async function sendLocationConfirmNotice(chatRoomId, userId, notice) {
   if (notice) await notifyRoom(chatRoomId, userId, 'newMessage', { roomId: chatRoomId, message: notice });
+}
+
+// 장소가 적힌 약속 요청이 확정됐을 때의 "OO 근처에서 만나요" 알림 메시지 (장소 제안 확정과 같은 모양) - 보내는 건 sendLocationConfirmNotice로
+async function createReservationLocationNotice(message, userId, pinId) {
+  if (!message.reservationLocation) return null;
+  try {
+    await supersedeOldLocationNotices(prisma, message.chatRoomId);
+    const created = await prisma.message.create({
+      data: {
+        chatRoomId: message.chatRoomId,
+        senderId: userId,
+        type: 'LOCATION_NOTICE',
+        locationPlace: message.reservationLocation,
+        locationAddress: message.reservationLocation,
+        locationLat: message.reservationLocationLat,
+        locationLon: message.reservationLocationLon,
+        locationNote: pinId, // 어느 핀 소속인지 (updatePin의 알림과 같은 방식)
+        locationStatus: 'PENDING',
+      },
+    });
+    return serializeMessage(created);
+  } catch (err) {
+    console.error('[reservation-confirm] notice failed:', err.message);
+    return null;
+  }
 }
 
 // 새 장소가 정해지면 이 방의 "모임 장소 추천받기" 카드와 요청을 통째로 지움 (모은 출발지도 같이 삭제됨)
