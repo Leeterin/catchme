@@ -480,6 +480,16 @@ async function respondToRequest(req, res, status) {
 
   // 요청 보낸 사람한테 실시간으로 알려줘서, 새로고침 안 해도 결과가 바로 반영되게 함
   notifyUser(request.senderId, status === 'ACCEPTED' ? 'friendsChanged' : 'friendRequestDeclined', {});
+  // 수락했으면 요청 보낸 사람 휴대폰에도 알림 (거절은 알리지 않음)
+  if (status === 'ACCEPTED') {
+    prisma.user.findUnique({ where: { id: req.userId }, select: { name: true } }).then((me) => {
+      pushInBackground([request.senderId], {
+        title: 'MEETZIP',
+        body: `${me?.name || '누군가'}님이 친구 요청을 수락했어요`,
+        data: { type: 'friend' },
+      });
+    }).catch(() => {});
+  }
 
   const message = status === 'ACCEPTED' ? '친구 요청을 수락했어요.' : '친구 요청을 거절했어요.';
   return res.json({ message, requestId: updated.id, status: updated.status });

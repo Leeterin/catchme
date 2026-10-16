@@ -1,6 +1,7 @@
 // 정기 알림 - 앱을 다시 열 이유를 주는 두 가지.
 //  1) 아침 8시: 오늘 일정이 있는 사람에게 "오늘 일정 N개 · 10:00 수업" (일정 없는 날엔 안 보냄)
 //  2) 일요일 저녁 7시: 다음 주에 열어둔 예약 가능 시간이 없는 사람에게 "다음 주 시간 열어둘까요?"
+//  3) 확정된 약속 1시간 전: "1시간 뒤 약속이에요"
 // 서버 안에서 5분마다 확인하고(runEngagementTick), Render가 잠들어 있으면 못 도니까 바깥 크론이 /api/cron/tick을 불러도 됨.
 // 같은 날 두 번 보내지 않게 user_engagement 테이블에 마지막으로 보낸 날을 남기고, 그걸 먼저 "선점"한 쪽만 보냄.
 const prisma = require('./prisma');
@@ -161,12 +162,59 @@ async function runWeeklyNudge(now) {
   return sent;
 }
 
+// 약속 1시간 전 알림 - 채팅으로 확정된 약속(sourceMessageId가 있는 일정)이 곧 시작하면 각자에게 보냄.
+// 틱마다 "지난번 확인 시각+1시간 ~ 지금+1시간"에 시작하는 약속만 봐서 한 번씩만 감 (서버가 재시작돼도 지난 구간은 다시 안 봄)
+const REMINDER_LEAD_MS = 60 * 60 * 1000;
+let lastReminderCheck = null;
+const remindedEventIds = new Set();
+async function runAppointmentReminders(now) {
+  const from = new Date((lastReminderCheck || new Date(now.getTime() - 5 * 60 * 1000)).getTime() + REMINDER_LEAD_MS);
+  const to = new Date(now.getTime() + REMINDER_LEAD_MS);
+  lastReminderCheck = now;
+  if (to <= from) return 0;
+  const events = await prisma.event.findMany({
+    where: {
+      eventType: 'busy',
+      isPendingHold: false,
+      sourceMessageId: { not: null },
+      startTime: { gt: from, lte: to },
+    },
+    select: { id: true, userId: true, title: true, startTime: true, sourceChatRoomId: true },
+  });
+  if (!events.length) return 0;
+  const hidePreview = new Set((await prisma.userSettings.findMany({
+    where: { userId: { in: [...new Set(events.map((e) => e.userId))] }, chatPreview: false }, select: { userId: true },
+  })).map((s) => s.userId));
+  let sent = 0;
+  for (const ev of events) {
+    if (remindedEventIds.has(ev.id)) continue;
+    remindedEventIds.add(ev.id);
+    const body = hidePreview.has(ev.userId)
+      ? `${hm(ev.startTime)}에 약속이 있어요`
+      : `${hm(ev.startTime)} ${ev.title}`;
+    // eslint-disable-next-line no-await-in-loop
+    await sendPushToUsers([ev.userId], {
+      title: '1시간 뒤 약속이에요 ⏰',
+      body,
+      data: ev.sourceChatRoomId ? { type: 'chat', roomId: ev.sourceChatRoomId } : { type: 'today' },
+    });
+    sent++;
+  }
+  if (remindedEventIds.size > 5000) remindedEventIds.clear();
+  return sent;
+}
+
 let running = false;
 async function runEngagementTick(now = new Date()) {
   if (running) return { skipped: true };
   running = true;
-  const result = { morning: 0, weekly: 0 };
+  const result = { morning: 0, weekly: 0, reminders: 0 };
   try {
+    try {
+      result.reminders = await runAppointmentReminders(now);
+    } catch (err) {
+      console.error('[engagement] reminders failed:', err.message);
+    }
     const h = now.getHours();
     if (h >= MORNING_HOUR && h < MORNING_UNTIL) result.morning = await runMorningBrief(now);
     if (now.getDay() === WEEKLY_DOW && h >= WEEKLY_HOUR && h < WEEKLY_UNTIL) result.weekly = await runWeeklyNudge(now);
