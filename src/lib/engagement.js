@@ -1,7 +1,7 @@
 // 정기 알림 - 앱을 다시 열 이유를 주는 두 가지.
 //  1) 아침 8시: 오늘 일정이 있는 사람에게 "오늘 일정 N개 · 10:00 수업" (일정 없는 날엔 안 보냄)
 //  2) 일요일 저녁 7시: 다음 주에 열어둔 예약 가능 시간이 없는 사람에게 "다음 주 시간 열어둘까요?"
-//  3) 확정된 약속 1시간 전: "1시간 뒤 약속이에요"
+//  3) 확정된 약속 1시간 전: "1시간 뒤 약속이에요" (그 약속을 잡은 채팅방 알림을 끈 사람은 제외)
 // 서버 안에서 5분마다 확인하고(runEngagementTick), Render가 잠들어 있으면 못 도니까 바깥 크론이 /api/cron/tick을 불러도 됨.
 // 같은 날 두 번 보내지 않게 user_engagement 테이블에 마지막으로 보낸 날을 남기고, 그걸 먼저 "선점"한 쪽만 보냄.
 const prisma = require('./prisma');
@@ -185,10 +185,16 @@ async function runAppointmentReminders(now) {
   const hidePreview = new Set((await prisma.userSettings.findMany({
     where: { userId: { in: [...new Set(events.map((e) => e.userId))] }, chatPreview: false }, select: { userId: true },
   })).map((s) => s.userId));
+  // 그 약속이 잡힌 채팅방의 알림을 끈 사람에겐 안 보냄
+  const mutedRooms = new Set((await prisma.chatRoomMember.findMany({
+    where: { muted: true, chatRoomId: { in: [...new Set(events.map((e) => e.sourceChatRoomId).filter(Boolean))] } },
+    select: { chatRoomId: true, userId: true },
+  })).map((m) => `${m.chatRoomId}:${m.userId}`));
   let sent = 0;
   for (const ev of events) {
     if (remindedEventIds.has(ev.id)) continue;
     remindedEventIds.add(ev.id);
+    if (ev.sourceChatRoomId && mutedRooms.has(`${ev.sourceChatRoomId}:${ev.userId}`)) continue;
     const body = hidePreview.has(ev.userId)
       ? `${hm(ev.startTime)}에 약속이 있어요`
       : `${hm(ev.startTime)} ${ev.title}`;

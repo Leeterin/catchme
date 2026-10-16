@@ -1947,7 +1947,7 @@ async function leaveRoom(req, res) {
     const now = new Date();
     await prisma.chatRoomMember.updateMany({
       where: { chatRoomId: roomId, userId: req.userId },
-      data: { clearedAt: now, lastReadAt: now },
+      data: { clearedAt: now, lastReadAt: now, muted: false }, // 나갔다가 다시 대화하면 새 방처럼 알림이 켜진 채로 시작
     });
     return res.json({ message: '채팅방을 나갔어요.' });
   }
@@ -2059,7 +2059,7 @@ async function deleteRoom(req, res) {
   const now = new Date();
   await prisma.chatRoomMember.update({
     where: { chatRoomId_userId: { chatRoomId: roomId, userId: req.userId } },
-    data: { clearedAt: now, lastReadAt: now },
+    data: { clearedAt: now, lastReadAt: now, muted: false }, // 삭제 뒤 새 메시지로 방이 다시 생기면 알림이 켜진 채로 시작
   });
 
   return res.json({ message: '채팅방을 삭제했어요.' });
