@@ -583,6 +583,35 @@ async function deleteEvent(req, res) {
   return res.json({ message: '일정을 삭제했어요.' });
 }
 
+// 친구 일정 중 나와 같이 있는 채팅방에서 확정된 약속인지 알려고, 그 일정들의 채팅방 중 내가 멤버인 방 id를 모아둠
+async function myRoomIdsAmong(userId, friendId, rawEvents) {
+  if (friendId === userId) return new Set();
+  const roomIds = [...new Set(rawEvents.filter((ev) => ev.sourceChatRoomId && !ev.isPendingHold).map((ev) => ev.sourceChatRoomId))];
+  if (roomIds.length === 0) return new Set();
+  const rows = await prisma.chatRoomMember.findMany({ where: { userId, chatRoomId: { in: roomIds } }, select: { chatRoomId: true } });
+  return new Set(rows.map((r) => r.chatRoomId));
+}
+
+// 친구 캘린더 한 시간 칸에 보여줄 일정 - 나랑 잡은 약속이면 공개설정과 상관없이 "나랑 약속"으로(나도 아는 약속이라),
+// 아니면 공개설정을 통과한 바쁨 일정의 제목. 색은 친구가 일정에 정해둔 색 - 공개설정을 통과한 일정 것만 줌(색 라벨 이름에 뜻이 있을 수 있어서)
+function friendSlotsInfo(dateKey, rawEvents, events, myRoomIds) {
+  const isWithMe = (ev) => !ev.isPendingHold && !!ev.sourceChatRoomId && myRoomIds.has(ev.sourceChatRoomId);
+  const slots = MATCH_HOURS.map((hour) => {
+    const slotStart = kstDate(dateKey, hour, 0);
+    const slotEnd = kstDate(dateKey, hour + 1, 0);
+    const overlaps = (ev) => ev.status === 'BUSY' && new Date(ev.startTime) < slotEnd && new Date(ev.endTime) > slotStart;
+    const withMe = rawEvents.find((ev) => overlaps(ev) && isWithMe(ev));
+    if (withMe) return { title: '나랑 약속', color: withMe.color || null, withMe: true };
+    const match = events.find(overlaps);
+    return match ? { title: match.title, color: match.color || null, withMe: false } : { title: null, color: null, withMe: false };
+  });
+  return {
+    titles: slots.map((x) => x.title),
+    colors: slots.map((x) => x.color),
+    withMe: slots.map((x) => x.withMe),
+  };
+}
+
 // GET /api/events/friend/:username?date=YYYY-MM-DD
 // 친구 한 명의 특정 날짜 시간대별 바쁨/가능 여부만 돌려줌 (일정 제목/내용은 절대 포함하지 않음 - 프라이버시)
 async function getFriendDaySchedule(req, res) {
@@ -634,8 +663,10 @@ async function getFriendDaySchedule(req, res) {
     select: {
       startTime: true, endTime: true, status: true, title: true, visiblePrivate: true, visibleGroupIds: true, availableFor: true,
       recurringWeekdays: true, recurringUntil: true, recurringExceptions: true,
+      color: true, sourceChatRoomId: true, isPendingHold: true,
     },
   });
+  const myRoomIds = await myRoomIdsAmong(req.userId, friend.id, rawEventsFetched);
 
   // 반복 일정은 이 특정 날짜의 요일에 실제로 해당하는지 확인하고, 시간(시:분)은 그대로 두되 날짜만 이 날로 다시 계산함
   const dow = dayStart.getDay();
@@ -684,14 +715,10 @@ async function getFriendDaySchedule(req, res) {
   });
 
   // 제목은 공개설정(친구/비즈니스)을 통과한 일정에서만 가져옴 - "나만보기"거나 분류가 안 맞으면 null이라 프론트에서 "일정"으로만 표시됨
-  const titles = MATCH_HOURS.map((hour) => {
-    const slotStart = kstDate(date, hour, 0);
-    const slotEnd = kstDate(date, hour + 1, 0);
-    const match = events.find((ev) => ev.status === 'BUSY' && new Date(ev.startTime) < slotEnd && new Date(ev.endTime) > slotStart);
-    return match ? match.title : null;
-  });
+  // (나랑 잡은 약속은 예외로 "나랑 약속")
+  const { titles, colors, withMe } = friendSlotsInfo(date, rawEvents, events, myRoomIds);
 
-  return res.json({ hours: MATCH_HOURS, busy, bookable, titles });
+  return res.json({ hours: MATCH_HOURS, busy, bookable, titles, colors, withMe });
 }
 
 // GET /api/events/friend/:username/month?year=Y&month=M(1~12)
@@ -746,8 +773,10 @@ async function getFriendMonthSchedule(req, res) {
     select: {
       startTime: true, endTime: true, status: true, title: true, visiblePrivate: true, visibleGroupIds: true, availableFor: true,
       recurringWeekdays: true, recurringUntil: true, recurringExceptions: true,
+      color: true, sourceChatRoomId: true, isPendingHold: true,
     },
   });
+  const myRoomIds = await myRoomIdsAmong(req.userId, friend.id, rawEventsFetched);
 
   const days = [];
   for (let d = 1; d <= daysInMonth; d++) {
@@ -790,13 +819,8 @@ async function getFriendMonthSchedule(req, res) {
       const slotEnd = kstDate(dateKey, hour + 1, 0);
       return events.some((ev) => ev.status === 'AVAILABLE' && new Date(ev.startTime) < slotEnd && new Date(ev.endTime) > slotStart);
     });
-    const titles = MATCH_HOURS.map((hour) => {
-      const slotStart = kstDate(dateKey, hour, 0);
-      const slotEnd = kstDate(dateKey, hour + 1, 0);
-      const match = events.find((ev) => ev.status === 'BUSY' && new Date(ev.startTime) < slotEnd && new Date(ev.endTime) > slotStart);
-      return match ? match.title : null;
-    });
-    days.push({ date: dateKey, busy, bookable, titles });
+    const { titles, colors, withMe } = friendSlotsInfo(dateKey, rawEvents, events, myRoomIds);
+    days.push({ date: dateKey, busy, bookable, titles, colors, withMe });
   }
 
   return res.json({ hours: MATCH_HOURS, days });
