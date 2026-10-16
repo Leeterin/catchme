@@ -35,6 +35,8 @@ function toPublicUser(user) {
     bio: user.bio,
     phonePublic: user.phonePublic,
     emailPublic: user.emailPublic,
+    birthday: user.birthday || null,
+    birthdayPublic: !!user.birthdayPublic,
     locationSharing: !!user.locationSharing,
     reviewNickname: user.reviewNickname || null,
     reviewAvatarUrl: user.reviewAvatarUrl || null,

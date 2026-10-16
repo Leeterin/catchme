@@ -54,6 +54,10 @@ model User {
   phonePublic Boolean @default(false)
   emailPublic Boolean @default(false) // 새로 가입하면 이메일은 기본 비공개 (전화번호와 같게)
 
+  // 생일 - 나이가 드러나지 않게 월-일만 저장 ("MM-DD"). 홈 '친구 생일' 위젯용
+  birthday       String?
+  birthdayPublic Boolean @default(false) // 전화번호처럼 기본 비공개 - 켜야 친구 목록에 생일이 내려감
+
   // 관리자 제재 - 정지되면 로그인 자체가 막힘 (관리자 페이지에서만 설정/해제 가능)
   isSuspended     Boolean   @default(false)
   suspendedReason String?

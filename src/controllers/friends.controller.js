@@ -32,6 +32,8 @@ const SELF_SELECT = {
   email: true,
   phonePublic: true,
   emailPublic: true,
+  birthday: true,
+  birthdayPublic: true,
 };
 
 // 상대방이 공개로 설정한 필드만 내려준다 (프라이버시 원칙)
@@ -127,6 +129,8 @@ async function listFriends(req, res) {
     const row = settingsMap[other.id];
     return {
       ...toPublicProfile(other),
+      // 생일은 검색·근처 추천 같은 모르는 사람 목록엔 안 내리고, 친구 목록에서만 (본인이 공개로 켠 경우)
+      birthday: other.birthdayPublic ? other.birthday : null,
       privateAccess: row ? row.privateAccess : false,
       groupIds: groupIdsByFriend[other.id] || [],
     };

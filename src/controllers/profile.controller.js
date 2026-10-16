@@ -9,9 +9,19 @@ const { USERNAME_RE, PHONE_RE, isAllowedImageDataUrl } = require('../lib/validat
 // 서버에서도 안전하게 최대 크기를 한 번 더 제한한다. (약 500KB)
 const MAX_IMAGE_CHARS = 700000; // base64 문자열 기준 대략 500KB
 
-// PATCH /api/profile   body: { name?, username?, bio?, phone?, phonePublic?, emailPublic?, profileImageUrl?, reviewNickname?, reviewAvatarUrl? }
+// "MM-DD" 형식이고 실제 있는 날짜인지 (2월 29일은 허용)
+const MONTH_DAYS = [31, 29, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
+function isValidBirthday(value) {
+  const m = /^(\d{2})-(\d{2})$/.exec(value);
+  if (!m) return false;
+  const month = Number(m[1]);
+  const day = Number(m[2]);
+  return month >= 1 && month <= 12 && day >= 1 && day <= MONTH_DAYS[month - 1];
+}
+
+// PATCH /api/profile   body: { name?, username?, bio?, phone?, phonePublic?, emailPublic?, birthday?, birthdayPublic?, profileImageUrl?, reviewNickname?, reviewAvatarUrl? }
 async function updateProfile(req, res) {
-  const { name, username, bio, phone, phonePublic, emailPublic, profileImageUrl, reviewNickname, reviewAvatarUrl } = req.body;
+  const { name, username, bio, phone, phonePublic, emailPublic, birthday, birthdayPublic, profileImageUrl, reviewNickname, reviewAvatarUrl } = req.body;
   const data = {};
 
   if (typeof name === 'string' && name.trim()) {
@@ -35,6 +45,14 @@ async function updateProfile(req, res) {
   }
   if (typeof phonePublic === 'boolean') data.phonePublic = phonePublic;
   if (typeof emailPublic === 'boolean') data.emailPublic = emailPublic;
+  // 생일은 월-일만 ("MM-DD"). 빈 문자열이면 지움
+  if (typeof birthday === 'string') {
+    if (birthday && !isValidBirthday(birthday)) {
+      return res.status(400).json({ message: '생일 형식이 올바르지 않아요.' });
+    }
+    data.birthday = birthday || null;
+  }
+  if (typeof birthdayPublic === 'boolean') data.birthdayPublic = birthdayPublic;
 
   if (typeof username === 'string' && username.trim()) {
     const normalized = username.trim().toLowerCase();
