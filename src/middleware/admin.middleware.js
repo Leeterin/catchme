@@ -29,4 +29,14 @@ async function requireAdmin(req, res, next) {
   }
 }
 
-module.exports = { requireAdmin };
+// 관리자는 이메일/아이디로만 알아보니, 그 이메일·아이디를 다른 사람이 새로 가지면 관리자가 돼버림
+// (예: 아무도 안 쓰는 관리자 아이디로 바꾸기, 관리자 이메일로 가입하기, 그 이메일을 적은 카카오 계정으로 가입하기).
+// 그래서 관리자 이메일·아이디는 예약해두고 가입/아이디 변경/소셜 가입에서 새로 못 쓰게 막음 - 이미 그 값을 가진 계정은 그대로 관리자
+function isReservedAdminEmail(email) {
+  return typeof email === 'string' && ADMIN_EMAILS.includes(email.trim().toLowerCase());
+}
+function isReservedAdminUsername(username) {
+  return typeof username === 'string' && ADMIN_USERNAMES.includes(username.trim().toLowerCase());
+}
+
+module.exports = { requireAdmin, isReservedAdminEmail, isReservedAdminUsername };

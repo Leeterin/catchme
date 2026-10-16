@@ -4,6 +4,7 @@ const crypto = require('crypto');
 const prisma = require('../lib/prisma');
 const { validateSignupInput } = require('../lib/validators');
 const { track } = require('../lib/analytics');
+const { isReservedAdminEmail, isReservedAdminUsername } = require('../middleware/admin.middleware');
 
 const SALT_ROUNDS = 12;
 const REFRESH_TOKEN_DAYS = 365; // 1년 동안 한 번도 안 열면 만료, 열 때마다 다시 1년으로 늘어남
@@ -69,6 +70,14 @@ async function signup(req, res) {
       if (existing.email === normalizedEmail) errors.email = '이미 사용 중인 이메일이에요.';
       if (existing.username === normalizedUsername) errors.username = '이미 사용 중인 아이디예요.';
       return res.status(409).json({ message: '이미 가입된 정보가 있어요.', errors });
+    }
+
+    // 관리자 이메일·아이디는 예약돼 있어서 새로 가입할 때 못 씀 (admin.middleware 참고)
+    if (isReservedAdminEmail(normalizedEmail) || isReservedAdminUsername(normalizedUsername)) {
+      const errors = {};
+      if (isReservedAdminEmail(normalizedEmail)) errors.email = '사용할 수 없는 이메일이에요.';
+      if (isReservedAdminUsername(normalizedUsername)) errors.username = '사용할 수 없는 아이디예요.';
+      return res.status(409).json({ message: '사용할 수 없는 정보가 있어요.', errors });
     }
 
     const passwordHash = await bcrypt.hash(password, SALT_ROUNDS);
@@ -192,7 +201,7 @@ async function checkUsername(req, res) {
   if (!username) return res.status(400).json({ message: '아이디를 입력해주세요.' });
 
   const exists = await prisma.user.findUnique({ where: { username }, select: { id: true } });
-  return res.json({ available: !exists });
+  return res.json({ available: !exists && !isReservedAdminUsername(username) });
 }
 
 // GET /api/auth/me — 로그인된 내 정보 (소셜 로그인 리다이렉트 직후 프론트가 토큰만 받고 사용자 정보를 마저 받아올 때 사용)
@@ -227,8 +236,9 @@ async function findOrCreateSocialUser({ provider, providerId, email, emailVerifi
     if (dupe) username = `${username}_${Date.now().toString().slice(-4)}`;
 
     // 인증 안 된 이메일이 이미 다른 계정에서 쓰이고 있으면 그 이메일은 쓰지 않음 (연결도 안 하고, 중복 오류도 안 나게)
+    // 관리자 이메일도 예약돼 있어서 새 계정에는 안 씀 - 안 그러면 그 이메일을 적은 카카오 계정으로 가입해 관리자가 될 수 있음
     const emailTaken = normalizedEmail
-      ? !!(await prisma.user.findUnique({ where: { email: normalizedEmail }, select: { id: true } }))
+      ? isReservedAdminEmail(normalizedEmail) || !!(await prisma.user.findUnique({ where: { email: normalizedEmail }, select: { id: true } }))
       : false;
 
     user = await prisma.user.create({

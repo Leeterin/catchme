@@ -3,6 +3,7 @@ const prisma = require('../lib/prisma');
 const { disconnectUser } = require('../lib/socket');
 const { toPublicUser } = require('./auth.controller');
 const { USERNAME_RE, PHONE_RE, isAllowedImageDataUrl } = require('../lib/validators');
+const { isReservedAdminUsername } = require('../middleware/admin.middleware');
 
 // 프로필 이미지는 외부 저장소 없이 DB에 base64 문자열로 바로 저장한다.
 // 원본을 그대로 넣으면 너무 커지므로, 프론트에서 작게 압축(리사이즈)한 걸 받는 걸 전제로 하고
@@ -62,6 +63,10 @@ async function updateProfile(req, res) {
     const existing = await prisma.user.findUnique({ where: { username: normalized } });
     if (existing && existing.id !== req.userId) {
       return res.status(409).json({ message: '이미 사용 중인 아이디예요.' });
+    }
+    // 관리자 아이디는 예약돼 있어서, 이미 그 아이디를 쓰는 계정이 아니면 바꿀 수 없음 (admin.middleware 참고)
+    if (isReservedAdminUsername(normalized) && !existing) {
+      return res.status(409).json({ message: '사용할 수 없는 아이디예요.' });
     }
     data.username = normalized;
   }
