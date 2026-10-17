@@ -175,6 +175,8 @@ function serializeMessage(message) {
       locationLat: message.reservationLocationLat,
       locationLon: message.reservationLocationLon,
       status: message.reservationStatus,
+      // 날짜 미정 약속(장소부터 정한 약속)의 시간을 정하려고 보낸 요청이면 그 약속 핀 - 앱이 카드에 그 약속 장소를 보여줌
+      pinId: message.locationPinId || null,
     },
   };
 }
