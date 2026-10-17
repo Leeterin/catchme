@@ -201,7 +201,8 @@ async function listFeedPosts(req, res) {
       },
       orderBy: { createdAt: 'desc' },
     }),
-    prisma.placeSave.findMany({ where: { userId: req.userId }, select: { placeId: true } }),
+    // 로그인 안 하고 보는 중이면 저장한 곳이 없음 (userId가 undefined면 Prisma가 조건을 빼버려서 모든 사람의 저장이 다 나옴)
+    req.userId ? prisma.placeSave.findMany({ where: { userId: req.userId }, select: { placeId: true } }) : [],
   ]);
   let posts = found;
   const savedPlaceIds = new Set(mySaves.map((s) => s.placeId));

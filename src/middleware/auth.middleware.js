@@ -36,4 +36,11 @@ function optionalAuth(req, res, next) {
   next();
 }
 
-module.exports = { requireAuth, optionalAuth };
+// 로그인 없이도 볼 수 있는 조회용(리뷰 목록 등) - 토큰이 아예 없으면 비회원으로 통과, 토큰이 있으면 requireAuth와 똑같이 검사.
+// optionalAuth처럼 만료된 토큰을 비회원으로 넘기면 앱이 토큰을 새로 받지 않아서, 로그인한 사람한테 내 저장 표시가 빠진 채로 보임
+function viewerAuth(req, res, next) {
+  if (!req.headers.authorization) return next();
+  return requireAuth(req, res, next);
+}
+
+module.exports = { requireAuth, optionalAuth, viewerAuth };
