@@ -724,6 +724,17 @@ async function hasConflictingPendingRequest(receiverId, start, end) {
   return !!pending;
 }
 
+// 이 방에 날짜 물어보기로 확정된(CONFIRMED) 날이 있고, 요청 시간이 그날(KST) 하루 안에 다 들어가는지
+async function isConfirmedDateAskDay(roomId, startDate, endDate) {
+  const dateKey = kstDateKey(startDate);
+  if (kstDateKey(new Date(endDate.getTime() - 1)) !== dateKey) return false;
+  const found = await prisma.message.findFirst({
+    where: { chatRoomId: roomId, type: 'TEXT', reservationNote: dateKey, reservationStatus: 'CONFIRMED' },
+    select: { id: true },
+  });
+  return !!found;
+}
+
 async function sendReservationRequest(req, res) {
   const { roomId } = req.params;
   const { start, end, note, location, locationLat, locationLon } = req.body;
@@ -746,7 +757,10 @@ async function sendReservationRequest(req, res) {
   const otherMemberIds = await getOtherMemberIds(roomId, req.userId);
 
   // 1:1 요청은 상대가 열어둔 "예약 가능 시간" 안에서만 받음 - 화면이 오래돼서 이미 약속이 잡힌 시간에 요청이 들어오는 것도 여기서 막힘
-  if (otherMemberIds.length === 1 && !(await isRangeBookableFor(otherMemberIds[0], req.userId, startDate, endDate))) {
+  // 단, 이 방에서 날짜 물어보기로 둘이 "좋아요" 한 날이면 그날 안의 시간은 열어둔 시간이 아니어도 받음 (상대가 수락해야 확정됨)
+  if (otherMemberIds.length === 1
+    && !(await isRangeBookableFor(otherMemberIds[0], req.userId, startDate, endDate))
+    && !(await isConfirmedDateAskDay(roomId, startDate, endDate))) {
     return res.status(409).json({ message: '그 사이 상대방의 예약 가능 시간이 바뀌었어요. 캘린더를 다시 확인해주세요.' });
   }
   for (const receiverId of otherMemberIds) {
