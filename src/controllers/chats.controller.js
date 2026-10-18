@@ -865,9 +865,11 @@ async function respondToReservation(req, res, status) {
     updated = await prisma.$transaction(async (tx) => {
       // 상태가 여전히 PENDING일 때만 업데이트되도록 조건을 걸어서, 거의 동시에 두 번 요청이 와도
       // 딱 하나만 실제로 처리되게 함 (둘 다 PENDING을 보고 동시에 통과해버리는 경쟁 상태 방지)
+      // 확정되면 이 카드의 시각을 지금으로 옮겨서, 예전 요청 자리에서 빠지고 채팅방 맨 아래(새 소식)로 내려오게 함 -
+      // 위에 묻힌 카드가 '확정됨'으로만 바뀌어서 확정된 걸 알아보기 어려웠음 (채팅 목록 최근 대화 순서도 같이 올라감)
       const { count } = await tx.message.updateMany({
         where: { id: messageId, reservationStatus: 'PENDING' },
-        data: { reservationStatus: status },
+        data: { reservationStatus: status, ...(status === 'CONFIRMED' ? { createdAt: new Date() } : {}) },
       });
       if (count === 0) {
         throw Object.assign(new Error('이미 처리된 요청이에요.'), { statusCode: 409 });
