@@ -113,6 +113,15 @@ async function getCarMinutes(from, to, departAt) {
 // 일정 시작(arriveAt)에 맞춰 도착하려면 몇 분 걸리고 언제 출발하는지 - 출발 시각의 교통 상황 기준.
 // 자동차는 "30분 전 출발"로 한 번 재고, 그 결과로 정한 출발 시각으로 다시 재서 맞춤
 async function getTripMinutes(from, to, mode, arriveAt) {
+  // 이미 지난 일정(지난 일정을 고칠 때 등)은 "미래 운행 정보"를 못 써서 지금 실시간 교통으로 계산됐음 -
+  // 같은 요일·같은 시각의 다음 주로 옮겨서 그 일정 시간대 교통 기준으로 계산 (돌려주는 출발 시각은 원래 일정 기준)
+  const originalArriveAt = arriveAt;
+  const WEEK_MS = 7 * 24 * 3600 * 1000;
+  const now = Date.now();
+  if (arriveAt.getTime() < now) {
+    const weeks = Math.ceil((now - arriveAt.getTime()) / WEEK_MS);
+    arriveAt = new Date(arriveAt.getTime() + weeks * WEEK_MS);
+  }
   const departFor = (m) => new Date(arriveAt.getTime() - m * 60 * 1000);
   let result;
   if (mode === 'car') {
@@ -123,7 +132,7 @@ async function getTripMinutes(from, to, mode, arriveAt) {
     // 카카오 대중교통 길찾기는 시각을 안 받아서, 추정치일 때만 출발 시간대 속도로 다시 계산
     if (result.source === 'fallback') result = { minutes: estimateMinutes(from, to, 'transit', departFor(result.minutes)), source: 'fallback' };
   }
-  const departAt = departFor(result.minutes);
+  const departAt = new Date(originalArriveAt.getTime() - result.minutes * 60 * 1000);
   // 새벽 대중교통은 지하철·버스가 거의 없어서 화면에 알려줌
   return { ...result, mode, departAt, night: mode === 'transit' && isNightHour(kstParts(departAt).hour) };
 }
