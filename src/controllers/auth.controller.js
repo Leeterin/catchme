@@ -302,6 +302,8 @@ function kakaoLoginRedirect(req, res) {
 async function kakaoCallback(req, res) {
   const { code } = req.query;
   const frontendUrl = process.env.FRONTEND_URL || '/';
+  // 동의 화면에서 '취소'를 누르면 code 없이 error=access_denied로 돌아옴 - 오류가 아니라 취소라고 알려서 앱이 오류 알림을 안 띄우게
+  if (!code && req.query.error === 'access_denied') return res.redirect(`${frontendUrl}?authError=cancelled`);
   if (!code) return res.redirect(`${frontendUrl}?authError=missing_code`);
   if (!checkOAuthState(req, res)) return res.redirect(`${frontendUrl}?authError=state_mismatch`);
 
@@ -352,6 +354,8 @@ function naverLoginRedirect(req, res) {
 async function naverCallback(req, res) {
   const { code, state } = req.query;
   const frontendUrl = process.env.FRONTEND_URL || '/';
+  // 동의 화면에서 '취소'를 누르면 code 없이 error=access_denied로 돌아옴 - 오류가 아니라 취소라고 알려서 앱이 오류 알림을 안 띄우게
+  if (!code && req.query.error === 'access_denied') return res.redirect(`${frontendUrl}?authError=cancelled`);
   if (!code) return res.redirect(`${frontendUrl}?authError=missing_code`);
   if (!checkOAuthState(req, res)) return res.redirect(`${frontendUrl}?authError=state_mismatch`);
 
