@@ -1593,6 +1593,33 @@ async function withdrawLocationSuggest(req, res) {
   return res.json({ message: serializeMessage(updated) });
 }
 
+// POST /api/chats/location-suggestions/:messageId/withdraw-all — 이 제안과 같은 약속에 투표 중인 후보를 전부 취소 (투표 자체를 접음)
+// 그 투표에 후보를 올린 사람만 할 수 있음 (친구가 올린 후보도 같이 취소됨)
+async function withdrawLocationSuggestGroup(req, res) {
+  const { messageId } = req.params;
+  const message = await prisma.message.findUnique({ where: { id: messageId } });
+  if (!message || message.type !== 'LOCATION_SUGGEST') {
+    return res.status(404).json({ message: '장소 제안을 찾을 수 없어요.' });
+  }
+  const pending = await prisma.message.findMany({
+    where: { chatRoomId: message.chatRoomId, type: 'LOCATION_SUGGEST', locationStatus: 'PENDING', ...locationGroupWhere(message.locationPinId) },
+    select: { id: true, senderId: true },
+  });
+  if (!pending.length) {
+    return res.status(409).json({ message: '이미 처리된 제안이에요.' });
+  }
+  if (!pending.some((m) => m.senderId === req.userId)) {
+    return res.status(403).json({ message: '후보를 올린 사람만 투표를 취소할 수 있어요.' });
+  }
+
+  const ids = pending.map((m) => m.id);
+  await prisma.message.updateMany({ where: { id: { in: ids }, locationStatus: 'PENDING' }, data: { locationStatus: 'WITHDRAWN' } });
+  const updated = await prisma.message.findMany({ where: { id: { in: ids } } });
+  const messages = updated.map(serializeMessage);
+  await Promise.all(messages.map((m) => notifyRoom(message.chatRoomId, req.userId, 'newMessage', { roomId: message.chatRoomId, message: m })));
+  return res.json({ messages });
+}
+
 // POST /api/chats/location-suggestions/:messageId/cancel — 확정됐던 장소 제안을 취소 (핀도 함께 제거)
 async function cancelLocationSuggestMessage(req, res) {
   const { messageId } = req.params;
@@ -2659,6 +2686,7 @@ module.exports = {
   acceptLocationSuggest,
   declineLocationSuggest,
   withdrawLocationSuggest,
+  withdrawLocationSuggestGroup,
   cancelLocationSuggestMessage,
   voteLocationSuggest,
   fixLocationSuggest,

@@ -23,6 +23,7 @@ const {
   acceptLocationSuggest,
   declineLocationSuggest,
   withdrawLocationSuggest,
+  withdrawLocationSuggestGroup,
   cancelLocationSuggestMessage,
   voteLocationSuggest,
   fixLocationSuggest,
@@ -83,6 +84,7 @@ router.post('/date-asks/:messageId/respond', respondDateAsk);
 router.post('/location-suggestions/:messageId/accept', acceptLocationSuggest);
 router.post('/location-suggestions/:messageId/decline', declineLocationSuggest);
 router.post('/location-suggestions/:messageId/withdraw', withdrawLocationSuggest);
+router.post('/location-suggestions/:messageId/withdraw-all', withdrawLocationSuggestGroup);
 router.post('/location-suggestions/:messageId/cancel', cancelLocationSuggestMessage);
 router.post('/location-suggestions/:messageId/vote', voteLocationSuggest);
 router.post('/location-suggestions/:messageId/fix', fixLocationSuggest);
