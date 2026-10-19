@@ -1,7 +1,7 @@
 // 정기 알림 - 앱을 다시 열 이유를 주는 두 가지.
 //  1) 아침 8시: 오늘 일정이 있는 사람에게 "오늘 일정 N개 · 10:00 수업" (일정 없는 날엔 안 보냄)
 //  2) 일요일 저녁 7시: 다음 주에 열어둔 예약 가능 시간이 없는 사람에게 "다음 주 시간 열어둘까요?"
-//  3) 확정된 약속 1시간 전: "1시간 뒤 약속이에요" (그 약속을 잡은 채팅방 알림을 끈 사람은 제외)
+//  3) 확정된 약속 1시간 전·5분 전: "1시간 뒤 약속이에요" / "5분 뒤 약속이에요" (그 약속을 잡은 채팅방 알림을 끈 사람은 제외)
 // 서버 안에서 5분마다 확인하고(runEngagementTick), Render가 잠들어 있으면 못 도니까 바깥 크론이 /api/cron/tick을 불러도 됨.
 // 같은 날 두 번 보내지 않게 user_engagement 테이블에 마지막으로 보낸 날을 남기고, 그걸 먼저 "선점"한 쪽만 보냄.
 const prisma = require('./prisma');
@@ -165,12 +165,14 @@ async function runWeeklyNudge(now) {
 // 약속 1시간 전 알림 - 채팅으로 확정된 약속(sourceMessageId가 있는 일정)이 곧 시작하면 각자에게 보냄.
 // 틱마다 "지난번 확인 시각+1시간 ~ 지금+1시간"에 시작하는 약속만 봐서 한 번씩만 감 (서버가 재시작돼도 지난 구간은 다시 안 봄)
 const REMINDER_LEAD_MS = 60 * 60 * 1000;
-let lastReminderCheck = null;
+const SOON_REMINDER_LEAD_MS = 5 * 60 * 1000; // 5분 전 알림 - 늦지 않게 1분마다 따로 확인
+const lastReminderCheck = new Map(); // 알림 종류(몇 분 전)별 지난번 확인 시각
 const remindedEventIds = new Set();
-async function runAppointmentReminders(now) {
-  const from = new Date((lastReminderCheck || new Date(now.getTime() - 5 * 60 * 1000)).getTime() + REMINDER_LEAD_MS);
-  const to = new Date(now.getTime() + REMINDER_LEAD_MS);
-  lastReminderCheck = now;
+async function runAppointmentReminders(now, leadMs = REMINDER_LEAD_MS) {
+  const last = lastReminderCheck.get(leadMs);
+  const from = new Date((last || new Date(now.getTime() - 5 * 60 * 1000)).getTime() + leadMs);
+  const to = new Date(now.getTime() + leadMs);
+  lastReminderCheck.set(leadMs, now);
   if (to <= from) return 0;
   const events = await prisma.event.findMany({
     where: {
@@ -192,15 +194,16 @@ async function runAppointmentReminders(now) {
   })).map((m) => `${m.chatRoomId}:${m.userId}`));
   let sent = 0;
   for (const ev of events) {
-    if (remindedEventIds.has(ev.id)) continue;
-    remindedEventIds.add(ev.id);
+    const remindKey = `${leadMs}:${ev.id}`;
+    if (remindedEventIds.has(remindKey)) continue;
+    remindedEventIds.add(remindKey);
     if (ev.sourceChatRoomId && mutedRooms.has(`${ev.sourceChatRoomId}:${ev.userId}`)) continue;
     const body = hidePreview.has(ev.userId)
       ? `${hm(ev.startTime)}에 약속이 있어요`
       : `${hm(ev.startTime)} ${ev.title}`;
     // eslint-disable-next-line no-await-in-loop
     await sendPushToUsers([ev.userId], {
-      title: '1시간 뒤 약속이에요 ⏰',
+      title: leadMs === REMINDER_LEAD_MS ? '1시간 뒤 약속이에요 ⏰' : '5분 뒤 약속이에요 ⏰',
       body,
       data: ev.sourceChatRoomId ? { type: 'chat', roomId: ev.sourceChatRoomId } : { type: 'today' },
     });
@@ -208,6 +211,21 @@ async function runAppointmentReminders(now) {
   }
   if (remindedEventIds.size > 5000) remindedEventIds.clear();
   return sent;
+}
+
+// 5분 전 알림은 5분마다 도는 틱으론 늦을 수 있어서 1분마다도 따로 확인 (틱과 동시에 돌아도 한 번만 보내게 막음)
+let soonRunning = false;
+async function runSoonReminders(now = new Date()) {
+  if (soonRunning) return 0;
+  soonRunning = true;
+  try {
+    return await runAppointmentReminders(now, SOON_REMINDER_LEAD_MS);
+  } catch (err) {
+    console.error('[engagement] soon reminders failed:', err.message);
+    return 0;
+  } finally {
+    soonRunning = false;
+  }
 }
 
 let running = false;
@@ -218,6 +236,7 @@ async function runEngagementTick(now = new Date()) {
   try {
     try {
       result.reminders = await runAppointmentReminders(now);
+      result.reminders += await runSoonReminders(now);
     } catch (err) {
       console.error('[engagement] reminders failed:', err.message);
     }
@@ -235,6 +254,7 @@ async function runEngagementTick(now = new Date()) {
 
 function startEngagementScheduler() {
   setInterval(() => { runEngagementTick(); }, 5 * 60 * 1000).unref();
+  setInterval(() => { runSoonReminders(); }, 60 * 1000).unref();
   setTimeout(() => { runEngagementTick(); }, 30 * 1000).unref(); // 서버가 막 깨어났을 때도 한 번
 }
 
