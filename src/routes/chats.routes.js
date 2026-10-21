@@ -18,6 +18,7 @@ const {
   sendTimeProposal,
   voteTimeProposal,
   cancelTimeProposal,
+  removeTimeProposalOption,
   sendDateAsk,
   respondDateAsk,
   sendLocationSuggest,
@@ -81,6 +82,7 @@ router.post('/messages/:messageId/cancel', cancelReservationMessage);
 router.post('/messages/:messageId/restore-availability-choice', restoreAvailabilityChoice);
 router.post('/time-proposals/:messageId/vote', testbots.withBotReaction(voteTimeProposal, testbots.onTimeVoted));
 router.post('/time-proposals/:messageId/cancel', cancelTimeProposal);
+router.post('/time-proposals/:messageId/options/:optionId/remove', removeTimeProposalOption);
 router.post('/date-asks/:messageId/respond', respondDateAsk);
 router.post('/location-suggestions/:messageId/accept', acceptLocationSuggest);
 router.post('/location-suggestions/:messageId/decline', declineLocationSuggest);

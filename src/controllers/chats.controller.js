@@ -1813,6 +1813,42 @@ async function voteTimeProposal(req, res) {
   return res.json({ message: serializeMessage(final) });
 }
 
+// POST /api/chats/time-proposals/:messageId/options/:optionId/remove — 여러 후보 중 하나만 지움 (제안한 사람만, 확정 전)
+// 그 후보에 했던 투표도 같이 지워짐. 후보가 하나만 남았으면 지우지 않음 (그땐 제안 자체를 취소)
+async function removeTimeProposalOption(req, res) {
+  const { messageId, optionId } = req.params;
+  const message = await prisma.message.findUnique({ where: { id: messageId }, include: PROPOSAL_INCLUDE });
+  if (!message || message.type !== 'TIME_PROPOSAL') {
+    return res.status(404).json({ message: '시간 제안을 찾을 수 없어요.' });
+  }
+  if (message.senderId !== req.userId) {
+    return res.status(403).json({ message: '본인이 보낸 제안의 후보만 지울 수 있어요.' });
+  }
+  if (message.proposalStatus !== 'VOTING') {
+    return res.status(409).json({ message: '이미 끝난 제안이에요.' });
+  }
+  if (!message.proposalOptions.some((o) => o.id === optionId)) {
+    return res.status(404).json({ message: '해당 시간 후보를 찾을 수 없어요.' });
+  }
+  if (message.proposalOptions.length <= 1) {
+    return res.status(409).json({ message: '후보가 하나뿐이라 지울 수 없어요. 제안을 취소해주세요.' });
+  }
+
+  await prisma.timeProposalOption.delete({ where: { id: optionId } });
+  let updated = await prisma.message.findUnique({ where: { id: messageId }, include: PROPOSAL_INCLUDE });
+  // 후보가 하나만 남으면 처음부터 하나만 보낸 제안처럼 제안한 사람이 그 후보에 투표한 걸로 둠
+  // (안 그러면 1:1에서 상대가 동의해도 제안한 사람 표가 없어서 확정이 안 됨)
+  if (updated.proposalOptions.length === 1) {
+    const last = updated.proposalOptions[0];
+    await prisma.timeProposalVote.deleteMany({ where: { userId: req.userId, option: { messageId } } });
+    await prisma.timeProposalVote.create({ data: { optionId: last.id, userId: req.userId } });
+    updated = await prisma.message.findUnique({ where: { id: messageId }, include: PROPOSAL_INCLUDE });
+    updated = (await maybeConfirmProposal(updated, message.chatRoomId, req.userId)) || updated;
+  }
+  await notifyRoom(message.chatRoomId, req.userId, 'newMessage', { roomId: message.chatRoomId, message: serializeMessage(updated) });
+  return res.json({ message: serializeMessage(updated) });
+}
+
 // POST /api/chats/time-proposals/:messageId/cancel — 진행 중인 제안 자체를 취소 (아직 확정 전)
 async function cancelTimeProposal(req, res) {
   const { messageId } = req.params;
@@ -2680,6 +2716,7 @@ module.exports = {
   sendTimeProposal,
   voteTimeProposal,
   cancelTimeProposal,
+  removeTimeProposalOption,
   sendDateAsk,
   respondDateAsk,
   sendLocationSuggest,
