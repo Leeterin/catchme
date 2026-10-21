@@ -156,6 +156,7 @@ app.use('/api/admin', adminRoutes);
 app.use('/api/invites', invitesRoutes);
 app.use('/api/engagement', require('./routes/engagement.routes'));
 app.use('/api/goals', require('./routes/goals.routes')); // 홈 '이번 달 목표'
+app.use('/api/testbots', require('./routes/testbots.routes')); // 혼자 확인용 테스트 친구
 
 // 정기 알림(아침 오늘 일정 / 일요일 다음 주 시간) - 서버 안에서 5분마다 돌지만, Render가 잠들어 있으면 못 도니까
 // 바깥 크론(GitHub Actions 등)이 10분마다 이 주소를 불러서 깨우고 돌릴 수 있게 함. CRON_SECRET이 없으면 이 주소는 꺼져 있음
