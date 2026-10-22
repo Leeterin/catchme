@@ -219,12 +219,17 @@ function computeMatchDays(eventsByUser, allUserIds, startDate, endDate, minHours
   // (예: 8:25까지만 예약 가능이면 매칭도 8:25에서 끝남)
   const STEP = 5;
   const SLOTS = 1440 / STEP;
+  const nowMs = Date.now(); // 이미 시작 시각이 지난 5분 칸은 매칭에서 뺌 (오늘 지난 시간이 후보로 뜨지 않게)
   const days = [];
   const cursor = new Date(startDate);
   let safety = 0;
   while (cursor <= endDate && safety < 62) {
     const dateKey = kstDateKeyFromDateObj(cursor);
     const ok = new Array(SLOTS).fill(true);
+    const dayStartMs = kstDate(dateKey, 0, 0).getTime();
+    for (let i = 0; i < SLOTS; i++) {
+      if (dayStartMs + i * STEP * 60000 < nowMs) ok[i] = false;
+    }
     allUserIds.forEach((id) => {
       const avail = dayIntervals(id, dateKey, 'AVAILABLE');
       const busy = dayIntervals(id, dateKey, 'BUSY');
