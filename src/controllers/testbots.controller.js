@@ -1,6 +1,6 @@
 // 테스트 친구(봇) - 혼자서 1:1·다인원 약속 흐름을 일반 채팅과 똑같이 확인하려고 만드는 내 계정 전용 가짜 친구 3명.
 // 진짜 계정·친구·채팅방이라 모든 기능이 일반 친구와 같은 코드로 돌아가고, 봇은 서버에서 알아서 반응함:
-//  - 약속 요청·날짜 물어보기를 받으면 바로 수락
+//  - 약속 요청·날짜 물어보기·약속 취소 요청을 받으면 바로 수락
 //  - 내가 시간 후보·장소 후보에 투표하면 같은 곳에 투표 (1:1 시간 후보는 첫 번째를 고름)
 // 봇은 이메일이 BOT_DOMAIN으로 끝나는 계정으로 구분하고(스키마 변경 없음), 아이디 검색엔 안 나옴.
 const prisma = require('../lib/prisma');
@@ -71,6 +71,16 @@ const onDateAskSent = (req, body) => {
   if (!m) return;
   return botIdsInRoom(req.params.roomId).then((bots) => bots.slice(0, 1).forEach((botId) => later(() =>
     runAs(chats.respondDateAsk, botId, { params: { messageId: m.id }, body: { action: 'accept' } }))));
+};
+// 약속 취소 요청도 수락
+const onCancelRequestSent = async (req, body) => {
+  const m = body && body.message;
+  if (!m) return;
+  const message = await prisma.message.findUnique({ where: { id: m.id }, select: { chatRoomId: true } });
+  if (!message) return;
+  const bots = await botIdsInRoom(message.chatRoomId);
+  bots.slice(0, 1).forEach((botId) => later(() =>
+    runAs(chats.respondCancelRequest, botId, { params: { messageId: m.id }, body: { action: 'accept' } })));
 };
 // 1:1 시간 후보는 상대가 하나를 고르는 방식이라 봇이 첫 번째를 고름 (그룹은 내가 투표하면 따라 투표)
 const onTimeProposalSent = async (req, body) => {
@@ -195,6 +205,6 @@ async function teardownTestBots(req, res) {
 
 module.exports = {
   BOT_DOMAIN, isBotEmail, withBotReaction,
-  onReservationSent, onDateAskSent, onTimeProposalSent, onTimeVoted, onLocationVoted,
+  onReservationSent, onDateAskSent, onCancelRequestSent, onTimeProposalSent, onTimeVoted, onLocationVoted,
   listTestBots, setupTestBots, teardownTestBots,
 };

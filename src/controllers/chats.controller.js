@@ -78,12 +78,16 @@ function serializeMessage(message) {
     return {
       ...base,
       text: message.text,
-      replyTo: message.replyToMessageId
+      replyTo: message.replyToMessageId && message.reservationLocation !== CANCEL_REQUEST_MARK
         ? { msgId: message.replyToMessageId, preview: message.replyToPreview }
         : null,
       // 날짜 먼저 물어보기("20일 어때요?") 카드 - 날짜는 reservationNote('YYYY-MM-DD'), 답은 reservationStatus에 둠
       dateAsk: message.reservationNote && message.reservationStatus
         ? { date: message.reservationNote, status: message.reservationStatus }
+        : null,
+      // 1:1 약속 취소 요청 카드 - 어느 약속인지는 replyToMessageId, 사유는 locationNote, 답은 reservationStatus에 둠
+      cancelRequest: message.reservationLocation === CANCEL_REQUEST_MARK
+        ? { targetId: message.replyToMessageId, reason: message.locationNote || '', status: message.reservationStatus }
         : null,
     };
   }
@@ -1051,6 +1055,99 @@ async function cancelReservationMessage(req, res) {
 
   await notifyRoom(message.chatRoomId, req.userId, 'newMessage', { roomId: message.chatRoomId, message: serializeMessage(updated) });
   pushToRoom(message.chatRoomId, req.userId, `${formatDateLabel(message.reservationStart)} ${formatTimeLabel(message.reservationStart, message.reservationEnd)} 약속을 취소했어요`);
+  return res.json({ message: serializeMessage(updated) });
+}
+
+// ------------------------------------------------------------
+// 1:1 약속 취소 요청 - 확정된 약속을 바로 지우지 않고 상대에게 "취소해도 될까요?"를 보내서, 상대가 수락하면 그때 취소함.
+// 메시지 타입을 새로 만들지 않고 TEXT 메시지에 표시(reservationLocation)를 붙여 저장함 (날짜 물어보기와 같은 방식)
+//  - replyToMessageId: 취소하려는 약속(RESERVATION) 메시지 id, locationNote: 취소 사유, reservationStatus: 답
+// (예전 버전 앱에는 그냥 "약속 취소 요청" 글자로 보임). 단톡방 시간 투표 약속은 지금처럼 바로 취소됨
+// ------------------------------------------------------------
+const CANCEL_REQUEST_MARK = 'CANCEL_REQUEST';
+
+// POST /api/chats/messages/:messageId/cancel-request   body: { reason }
+async function sendCancelRequest(req, res) {
+  const { messageId } = req.params;
+  const reason = typeof (req.body || {}).reason === 'string' ? req.body.reason.trim().slice(0, 200) : '';
+  const target = await prisma.message.findUnique({ where: { id: messageId } });
+  if (!target || target.type !== 'RESERVATION') {
+    return res.status(404).json({ message: '약속을 찾을 수 없어요.' });
+  }
+  const canMessage = await assertCanMessage(target.chatRoomId, req.userId);
+  if (!canMessage.ok) {
+    return res.status(canMessage.statusCode).json({ message: canMessage.message });
+  }
+  if (target.reservationStatus !== 'CONFIRMED') {
+    return res.status(409).json({ message: '확정된 약속만 취소할 수 있어요.' });
+  }
+  const already = await prisma.message.findFirst({
+    where: { chatRoomId: target.chatRoomId, type: 'TEXT', reservationLocation: CANCEL_REQUEST_MARK, replyToMessageId: messageId, reservationStatus: 'PENDING' },
+  });
+  if (already) {
+    return res.status(409).json({ message: already.senderId === req.userId ? '이미 취소 요청을 보냈어요.' : '상대가 보낸 취소 요청이 와 있어요.' });
+  }
+
+  const label = `${formatDateLabel(target.reservationStart)} ${formatTimeLabel(target.reservationStart, target.reservationEnd)}`;
+  const message = await prisma.message.create({
+    data: {
+      chatRoomId: target.chatRoomId,
+      senderId: req.userId,
+      type: 'TEXT',
+      text: `🚫 ${label} 약속 취소 요청${reason ? `\n사유: ${reason}` : ''}`,
+      replyToMessageId: messageId,
+      reservationLocation: CANCEL_REQUEST_MARK,
+      locationNote: reason || null,
+      reservationStatus: 'PENDING',
+    },
+  });
+
+  await notifyRoom(target.chatRoomId, req.userId, 'newMessage', { roomId: target.chatRoomId, message: serializeMessage(message) });
+  pushToRoom(target.chatRoomId, req.userId, `${label} 약속 취소 요청이 왔어요${reason ? ` - ${reason}` : ''}`);
+  return res.status(201).json({ message: serializeMessage(message) });
+}
+
+// POST /api/chats/cancel-requests/:messageId/respond   body: { action: 'accept' | 'decline' | 'withdraw', restoreAvailability }
+// 받은 사람이 수락하면 기존 약속 취소(cancelReservationMessage)를 그대로 실행함 - 핀/캘린더 정리와 알림도 그쪽에서 함
+async function respondCancelRequest(req, res) {
+  const { messageId } = req.params;
+  const { action, restoreAvailability } = req.body || {};
+  const nextStatus = { accept: 'CONFIRMED', decline: 'DECLINED', withdraw: 'WITHDRAWN' }[action];
+  if (!nextStatus) return res.status(400).json({ message: '답이 올바르지 않아요.' });
+
+  const message = await prisma.message.findUnique({ where: { id: messageId } });
+  if (!message || message.type !== 'TEXT' || message.reservationLocation !== CANCEL_REQUEST_MARK) {
+    return res.status(404).json({ message: '취소 요청을 찾을 수 없어요.' });
+  }
+  if (!(await assertMembership(message.chatRoomId, req.userId))) {
+    return res.status(403).json({ message: '이 채팅방에 접근할 권한이 없어요.' });
+  }
+  const isSender = message.senderId === req.userId;
+  if (action === 'withdraw' ? !isSender : isSender) {
+    return res.status(403).json({ message: action === 'withdraw' ? '본인이 보낸 요청만 취소할 수 있어요.' : '내가 보낸 요청에는 답할 수 없어요.' });
+  }
+
+  // 두 사람이 거의 동시에 눌러도 한 번만 바뀌게, 아직 대기 중일 때만 바꿈
+  const { count } = await prisma.message.updateMany({
+    where: { id: messageId, reservationStatus: 'PENDING' },
+    data: { reservationStatus: nextStatus },
+  });
+  if (!count) return res.status(409).json({ message: '이미 답한 요청이에요.' });
+
+  if (action === 'accept') {
+    // 기존 취소 API를 수락한 사람 이름으로 그대로 실행 (응답만 받아둠)
+    const out = { statusCode: 200, body: null, status(code) { this.statusCode = code; return this; }, json(b) { this.body = b; return this; } };
+    await cancelReservationMessage({ userId: req.userId, params: { messageId: message.replyToMessageId }, body: { restoreAvailability } }, out);
+    if (out.statusCode >= 400) {
+      // 약속이 이미 취소됐거나 해서 못 지웠으면 요청은 다시 대기로 돌려놓고 이유를 알려줌
+      await prisma.message.update({ where: { id: messageId }, data: { reservationStatus: 'PENDING' } });
+      return res.status(out.statusCode).json(out.body);
+    }
+  }
+
+  const updated = await prisma.message.findUnique({ where: { id: messageId } });
+  await notifyRoom(message.chatRoomId, req.userId, 'newMessage', { roomId: message.chatRoomId, message: serializeMessage(updated) });
+  if (action === 'decline') pushToRoom(message.chatRoomId, req.userId, '약속 취소 요청을 거절했어요. 약속은 그대로예요');
   return res.json({ message: serializeMessage(updated) });
 }
 
@@ -2719,6 +2816,8 @@ module.exports = {
   removeTimeProposalOption,
   sendDateAsk,
   respondDateAsk,
+  sendCancelRequest,
+  respondCancelRequest,
   sendLocationSuggest,
   acceptLocationSuggest,
   declineLocationSuggest,
